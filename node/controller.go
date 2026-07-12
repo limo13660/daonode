@@ -2,15 +2,14 @@ package node
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
+	panel "github.com/limo13660/daonode/api/v2board"
+	"github.com/limo13660/daonode/common/task"
+	"github.com/limo13660/daonode/conf"
+	"github.com/limo13660/daonode/core"
+	"github.com/limo13660/daonode/limiter"
 	log "github.com/sirupsen/logrus"
-	panel "github.com/wyx2685/v2node/api/v2board"
-	"github.com/wyx2685/v2node/common/task"
-	"github.com/wyx2685/v2node/conf"
-	"github.com/wyx2685/v2node/core"
-	"github.com/wyx2685/v2node/limiter"
 )
 
 type Controller struct {
@@ -56,9 +55,6 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
-	if len(c.userList) == 0 {
-		return errors.New("add users error: not have any user")
-	}
 	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get user alive list: %s", err)
@@ -69,8 +65,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
 	c.limiter = l
 	if node.Security == panel.Tls {
-		err = c.requestCert()
-		if err != nil {
+		if err := c.requestCert(); err != nil {
 			return fmt.Errorf("request cert error: %s", err)
 		}
 	}

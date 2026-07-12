@@ -7,7 +7,7 @@ import (
 )
 
 var command = &cobra.Command{
-	Use: "v2node",
+	Use: "daonode",
 }
 
 func Run() {

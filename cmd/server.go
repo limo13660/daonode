@@ -9,12 +9,12 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/limo13660/daonode/conf"
+	"github.com/limo13660/daonode/core"
+	"github.com/limo13660/daonode/limiter"
+	"github.com/limo13660/daonode/node"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"github.com/wyx2685/v2node/conf"
-	"github.com/wyx2685/v2node/core"
-	"github.com/wyx2685/v2node/limiter"
-	"github.com/wyx2685/v2node/node"
 )
 
 var (
@@ -24,7 +24,7 @@ var (
 
 var serverCommand = cobra.Command{
 	Use:   "server",
-	Short: "Run v2node server",
+	Short: "Run daonode server",
 	Run:   serverHandle,
 	Args:  cobra.NoArgs,
 }
@@ -32,7 +32,7 @@ var serverCommand = cobra.Command{
 func init() {
 	serverCommand.PersistentFlags().
 		StringVarP(&config, "config", "c",
-			"/etc/v2node/config.json", "config file path")
+			"/etc/daonode/config.json", "config file path")
 	serverCommand.PersistentFlags().
 		BoolVarP(&watch, "watch", "w",
 			true, "watch file path change")

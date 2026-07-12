@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	panel "github.com/wyx2685/v2node/api/v2board"
-	"github.com/wyx2685/v2node/common/format"
-	"github.com/wyx2685/v2node/common/rate"
+	panel "github.com/limo13660/daonode/api/v2board"
+	"github.com/limo13660/daonode/common/format"
+	"github.com/limo13660/daonode/common/rate"
 )
 
 var limitLock sync.RWMutex
@@ -19,7 +19,7 @@ func Init() {
 }
 
 type Limiter struct {
-	Nodetype      string         // Node type, e.g. "v2ray", "trojan", "shadowsocks"
+	Nodetype      string         // Registered protocol runtime name.
 	SpeedLimit    int            // Node speed limit in Mbps
 	UserOnlineIP  *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
 	OldUserOnline *sync.Map      // Key: Ip, value: Uid
@@ -27,6 +27,7 @@ type Limiter struct {
 	UserLimitInfo *sync.Map      // Key: TagUUID value: UserLimitInfo
 	SpeedLimiter  *sync.Map      // key: TagUUID, value: *DynamicBucket
 	AliveList     map[int]int    // Key: Uid, value: alive_ip
+	aliveMu       sync.RWMutex
 }
 
 type UserLimitInfo struct {
@@ -85,6 +86,8 @@ func DeleteLimiter(tag string) {
 }
 
 func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel.UserInfo, modified []panel.UserInfo) {
+	l.aliveMu.Lock()
+	defer l.aliveMu.Unlock()
 	for i := range deleted {
 		l.UserLimitInfo.Delete(format.UserTag(tag, deleted[i].Uuid))
 		l.UserOnlineIP.Delete(format.UserTag(tag, deleted[i].Uuid))
@@ -129,6 +132,12 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 	}
 }
 
+func (l *Limiter) SetAliveList(aliveList map[int]int) {
+	l.aliveMu.Lock()
+	l.AliveList = aliveList
+	l.aliveMu.Unlock()
+}
+
 func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire time.Time) error {
 	if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, uuid)); ok {
 		info := v.(*UserLimitInfo)
@@ -167,11 +176,13 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	} else {
 		return nil, true
 	}
-	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
+	if noUDPsource {
 		// Store online user for device limit
 		newipMap := new(sync.Map)
 		newipMap.Store(ip, uid)
+		l.aliveMu.RLock()
 		aliveIp := l.AliveList[uid]
+		l.aliveMu.RUnlock()
 		// If any device is online
 		if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
 			oldipMap := v.(*sync.Map)

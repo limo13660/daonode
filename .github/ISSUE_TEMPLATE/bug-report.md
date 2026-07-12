@@ -1,6 +1,6 @@
 ---
 name: "Bug 反馈"
-about: 创建一个报告以帮助我们修复并改进v2node
+about: 创建一个报告以帮助我们修复并改进daonode
 title: ''
 labels: 
 assignees: ''
@@ -17,7 +17,7 @@ assignees: ''
 
 
 **日志和错误**
-请使用`v2node log`查看并添加日志，没有日志的issue不会得到答复并且会被直接关闭
+请使用`daonode log`查看并添加日志，没有日志的issue不会得到答复并且会被直接关闭
 
 
 

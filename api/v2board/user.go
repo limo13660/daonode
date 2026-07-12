@@ -133,7 +133,7 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
 	const path = "/api/v1/server/UniProxy/push"
-	_, err := c.client.R().
+	response, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
@@ -141,12 +141,18 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 	if err != nil {
 		return err
 	}
+	if response == nil || response.IsError() {
+		if response == nil {
+			return fmt.Errorf("report user traffic received nil response")
+		}
+		return fmt.Errorf("report user traffic failed with status %d", response.StatusCode())
+	}
 	return nil
 }
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
-	_, err := c.client.R().
+	response, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
@@ -154,6 +160,12 @@ func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]stri
 
 	if err != nil {
 		return err
+	}
+	if response == nil || response.IsError() {
+		if response == nil {
+			return fmt.Errorf("report online users received nil response")
+		}
+		return fmt.Errorf("report online users failed with status %d", response.StatusCode())
 	}
 
 	return nil

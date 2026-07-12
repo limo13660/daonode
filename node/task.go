@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
+	panel "github.com/limo13660/daonode/api/v2board"
+	"github.com/limo13660/daonode/common/task"
+	vCore "github.com/limo13660/daonode/core"
 	log "github.com/sirupsen/logrus"
-	panel "github.com/wyx2685/v2node/api/v2board"
-	"github.com/wyx2685/v2node/common/task"
-	vCore "github.com/wyx2685/v2node/core"
 )
 
 func (c *Controller) startTasks(node *panel.NodeInfo) {
@@ -31,18 +31,17 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	_ = c.nodeInfoMonitorPeriodic.Start(false)
 	log.WithField("tag", c.tag).Info("Start report node status")
 	_ = c.userReportPeriodic.Start(false)
-	if node.Security == panel.Tls {
+	if node.Security == panel.Tls && c.info.Common.CertInfo != nil {
 		switch c.info.Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
 		default:
 			c.renewCertPeriodic = &task.Task{
 				Name:     "renewCertTask",
-				Interval: time.Hour * 24,
+				Interval: 24 * time.Hour,
 				Execute:  c.renewCertTask,
 				ReloadCh: c.server.ReloadCh,
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
-			// delay to start renewCert
 			_ = c.renewCertPeriodic.Start(true)
 		}
 	}
@@ -103,10 +102,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 
 	// update alive list
 	if newA != nil {
-		c.limiter.AliveList = newA
+		c.limiter.SetAliveList(newA)
 	}
 	// node no changed, check users
-	if len(newU) == 0 {
+	if newU == nil {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}

@@ -4,21 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
-
-	"encoding/json"
 )
 
-// Security type
 const (
-	None    = 0
-	Tls     = 1
-	Reality = 2
+	None = iota
+	Tls
+	Reality
 )
 
 type NodeInfo struct {
@@ -32,61 +29,20 @@ type NodeInfo struct {
 }
 
 type CommonNode struct {
-	Protocol   string      `json:"protocol"`
-	ListenIP   string      `json:"listen_ip"`
-	ServerPort int         `json:"server_port"`
-	Routes     []Route     `json:"routes"`
-	BaseConfig *BaseConfig `json:"base_config"`
-	//vless vmess trojan
-	Tls                int         `json:"tls"`
-	TlsSettings        TlsSettings `json:"tls_settings"`
-	CertInfo           *CertInfo
-	Network            string          `json:"network"`
-	NetworkSettings    json.RawMessage `json:"network_settings"`
-	Encryption         string          `json:"encryption"`
-	EncryptionSettings EncSettings     `json:"encryption_settings"`
-	ServerName         string          `json:"server_name"`
-	Flow               string          `json:"flow"`
-	//shadowsocks
-	Cipher    string `json:"cipher"`
-	ServerKey string `json:"server_key"`
-	//tuic
-	CongestionControl string `json:"congestion_control"`
-	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake"`
-	//anytls
-	PaddingScheme []string `json:"padding_scheme,omitempty"`
-	//hysteria hysteria2
-	UpMbps                  int    `json:"up_mbps"`
-	DownMbps                int    `json:"down_mbps"`
-	Obfs                    string `json:"obfs"`
-	ObfsPassword            string `json:"obfs_password"`
-	Ignore_Client_Bandwidth bool   `json:"ignore_client_bandwidth"`
-}
-
-type Route struct {
-	Id          int      `json:"id"`
-	Match       []string `json:"match"`
-	Action      string   `json:"action"`
-	ActionValue *string  `json:"action_value"`
-}
-
-type BaseConfig struct {
-	PushInterval           any `json:"push_interval"`
-	PullInterval           any `json:"pull_interval"`
-	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
-	NodeReportMinTraffic   int `json:"node_report_min_traffic"`
+	Protocol          string      `json:"protocol"`
+	ServerPort        int         `json:"server_port"`
+	TransportProtocol string      `json:"transport_protocol"`
+	MTU               int         `json:"mtu"`
+	UserNamePrefix    string      `json:"username_prefix"`
+	BaseConfig        *BaseConfig `json:"base_config"`
+	Tls               int         `json:"tls"`
+	TlsSettings       TlsSettings `json:"tls_settings"`
+	CertInfo          *CertInfo   `json:"-"`
 }
 
 type TlsSettings struct {
 	ServerName       string   `json:"server_name"`
 	ServerNames      []string `json:"server_names"`
-	Dest             string   `json:"dest"`
-	ServerPort       string   `json:"server_port"`
-	ShortId          string   `json:"short_id"`
-	ShortIds         []string `json:"short_ids"`
-	PrivateKey       string   `json:"private_key"`
-	Mldsa65Seed      string   `json:"mldsa65Seed"`
-	Xver             uint64   `json:"xver,string"`
 	CertMode         string   `json:"cert_mode"`
 	CertFile         string   `json:"cert_file"`
 	KeyFile          string   `json:"key_file"`
@@ -106,17 +62,16 @@ type CertInfo struct {
 	RejectUnknownSni bool
 }
 
-type EncSettings struct {
-	Mode          string `json:"mode"`
-	Ticket        string `json:"ticket"`
-	ServerPadding string `json:"server_padding"`
-	PrivateKey    string `json:"private_key"`
+type BaseConfig struct {
+	PushInterval           any `json:"push_interval"`
+	PullInterval           any `json:"pull_interval"`
+	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
+	NodeReportMinTraffic   int `json:"node_report_min_traffic"`
 }
 
-func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
+func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	const path = "/api/v2/server/config"
-	r, err := c.client.
-		R().
+	response, err := c.client.R().
 		SetContext(ctx).
 		SetHeader("If-None-Match", c.nodeEtag).
 		ForceContentType("application/json").
@@ -124,125 +79,121 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if r == nil {
+	if response == nil {
 		return nil, fmt.Errorf("received nil response")
 	}
-
-	if r.StatusCode() == 304 {
+	if response.StatusCode() == 304 {
 		return nil, nil
 	}
-	hash := sha256.Sum256(r.Body())
+	if response.IsError() {
+		return nil, fmt.Errorf("get node config failed with status %d", response.StatusCode())
+	}
+
+	hash := sha256.Sum256(response.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
 	if c.responseBodyHash == newBodyHash {
 		return nil, nil
 	}
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
 
-	if r != nil {
-		defer func() {
-			if r.RawBody() != nil {
-				r.RawBody().Close()
-			}
-		}()
-	} else {
-		return nil, fmt.Errorf("received nil response")
+	common := &CommonNode{}
+	if err := json.Unmarshal(response.Body(), common); err != nil {
+		return nil, fmt.Errorf("decode node params: %w", err)
 	}
-	node = &NodeInfo{
-		Id: c.NodeId,
+	if common.Protocol != "mieru" {
+		return nil, fmt.Errorf("unsupported protocol: %s", common.Protocol)
 	}
-	// parse protocol params
-	cm := &CommonNode{}
-	err = json.Unmarshal(r.Body(), cm)
+	if common.ServerPort < 1 || common.ServerPort > 65535 {
+		return nil, fmt.Errorf("invalid Mieru server port: %d", common.ServerPort)
+	}
+	if common.TransportProtocol == "" {
+		common.TransportProtocol = "TCP"
+	}
+	if common.MTU == 0 {
+		common.MTU = 1400
+	}
+	if common.UserNamePrefix == "" {
+		common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
+	}
+	if common.BaseConfig == nil {
+		common.BaseConfig = &BaseConfig{PushInterval: 60, PullInterval: 60}
+	}
+	common.CertInfo = buildCertInfo(c.NodeId, common.Protocol, common.TlsSettings)
+
+	pushInterval, err := intervalToTime(common.BaseConfig.PushInterval)
 	if err != nil {
-		return nil, fmt.Errorf("decode node params error: %s", err)
+		return nil, fmt.Errorf("invalid push interval: %w", err)
 	}
-	switch cm.Protocol {
-	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":
-		node.Type = cm.Protocol
-		node.Security = cm.Tls
-	case "shadowsocks":
-		node.Type = cm.Protocol
-		node.Security = 0
-	default:
-		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
+	pullInterval, err := intervalToTime(common.BaseConfig.PullInterval)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pull interval: %w", err)
 	}
-	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
-	cf := cm.TlsSettings.CertFile
-	kf := cm.TlsSettings.KeyFile
-	if cf == "" {
-		cf = filepath.Join("/etc/v2node/", cm.Protocol+strconv.Itoa(c.NodeId)+".cer")
+
+	c.responseBodyHash = newBodyHash
+	c.nodeEtag = response.Header().Get("ETag")
+
+	return &NodeInfo{
+		Id:           c.NodeId,
+		Type:         "mieru",
+		Security:     common.Tls,
+		PushInterval: pushInterval,
+		PullInterval: pullInterval,
+		Tag:          fmt.Sprintf("[%s]-mieru:%d", c.APIHost, c.NodeId),
+		Common:       common,
+	}, nil
+}
+
+func buildCertInfo(nodeID int, protocol string, settings TlsSettings) *CertInfo {
+	certFile := settings.CertFile
+	if certFile == "" {
+		certFile = filepath.Join("/etc/daonode", protocol+strconv.Itoa(nodeID)+".cer")
 	}
-	if kf == "" {
-		kf = filepath.Join("/etc/v2node/", cm.Protocol+strconv.Itoa(c.NodeId)+".key")
+	keyFile := settings.KeyFile
+	if keyFile == "" {
+		keyFile = filepath.Join("/etc/daonode", protocol+strconv.Itoa(nodeID)+".key")
 	}
-	cm.CertInfo = &CertInfo{
-		CertMode:         cm.TlsSettings.CertMode,
-		CertFile:         cf,
-		KeyFile:          kf,
-		Email:            "node@v2board.com",
-		CertDomain:       cm.TlsSettings.PrimaryServerName(),
-		DNSEnv:           make(map[string]string),
-		Provider:         cm.TlsSettings.Provider,
-		RejectUnknownSni: cm.TlsSettings.RejectUnknownSni == "1",
-	}
-	if cm.CertInfo.CertMode == "dns" && cm.TlsSettings.DNSEnv != "" {
-		envs := strings.Split(cm.TlsSettings.DNSEnv, ",")
-		for _, env := range envs {
-			kv := strings.SplitN(env, "=", 2)
-			if len(kv) == 2 {
-				cm.CertInfo.DNSEnv[kv[0]] = kv[1]
-			}
+	dnsEnv := make(map[string]string)
+	for _, item := range strings.Split(settings.DNSEnv, ",") {
+		parts := strings.SplitN(item, "=", 2)
+		if len(parts) == 2 {
+			dnsEnv[parts[0]] = parts[1]
 		}
 	}
-
-	// set interval
-	node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
-	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
-
-	node.Common = cm
-
-	return node, nil
-}
-
-func intervalToTime(i interface{}) time.Duration {
-	switch reflect.TypeOf(i).Kind() {
-	case reflect.Int:
-		return time.Duration(i.(int)) * time.Second
-	case reflect.String:
-		i, _ := strconv.Atoi(i.(string))
-		return time.Duration(i) * time.Second
-	case reflect.Float64:
-		return time.Duration(i.(float64)) * time.Second
-	default:
-		return time.Duration(reflect.ValueOf(i).Int()) * time.Second
+	return &CertInfo{
+		CertMode:         settings.CertMode,
+		CertFile:         certFile,
+		KeyFile:          keyFile,
+		Email:            "node@daonode.local",
+		CertDomain:       settings.PrimaryServerName(),
+		DNSEnv:           dnsEnv,
+		Provider:         settings.Provider,
+		RejectUnknownSni: settings.RejectUnknownSni == "1",
 	}
-}
-
-func (t TlsSettings) EffectiveServerNames() []string {
-	if len(t.ServerNames) > 0 {
-		return t.ServerNames
-	}
-	if t.ServerName == "" {
-		return nil
-	}
-	return []string{t.ServerName}
-}
-
-func (t TlsSettings) EffectiveShortIds() []string {
-	if len(t.ShortIds) > 0 {
-		return t.ShortIds
-	}
-	if t.ShortId == "" {
-		return nil
-	}
-	return []string{t.ShortId}
 }
 
 func (t TlsSettings) PrimaryServerName() string {
-	serverNames := t.EffectiveServerNames()
-	if len(serverNames) == 0 {
-		return ""
+	if len(t.ServerNames) > 0 {
+		return t.ServerNames[0]
 	}
-	return serverNames[0]
+	return t.ServerName
+}
+
+func intervalToTime(value any) (time.Duration, error) {
+	switch v := value.(type) {
+	case nil:
+		return time.Minute, nil
+	case int:
+		return time.Duration(v) * time.Second, nil
+	case int64:
+		return time.Duration(v) * time.Second, nil
+	case float64:
+		return time.Duration(v) * time.Second, nil
+	case string:
+		seconds, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, err
+		}
+		return time.Duration(seconds) * time.Second, nil
+	default:
+		return 0, fmt.Errorf("unsupported value type %T", value)
+	}
 }

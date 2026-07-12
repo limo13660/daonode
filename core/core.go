@@ -1,22 +1,11 @@
 package core
 
 import (
+	"fmt"
 	"sync"
 
-	log "github.com/sirupsen/logrus"
-	panel "github.com/wyx2685/v2node/api/v2board"
-	"github.com/wyx2685/v2node/conf"
-	"github.com/wyx2685/v2node/core/app/dispatcher"
-	_ "github.com/wyx2685/v2node/core/distro/all"
-	"github.com/xtls/xray-core/app/proxyman"
-	"github.com/xtls/xray-core/app/stats"
-	"github.com/xtls/xray-core/common/serial"
-	"github.com/xtls/xray-core/core"
-	"github.com/xtls/xray-core/features/inbound"
-	"github.com/xtls/xray-core/features/outbound"
-	"github.com/xtls/xray-core/features/routing"
-	coreConf "github.com/xtls/xray-core/infra/conf"
-	"google.golang.org/protobuf/proto"
+	panel "github.com/limo13660/daonode/api/v2board"
+	"github.com/limo13660/daonode/conf"
 )
 
 type AddUsersParams struct {
@@ -25,106 +14,116 @@ type AddUsersParams struct {
 	*panel.NodeInfo
 }
 
-type V2Core struct {
-	Config     *conf.Conf
-	ReloadCh   chan struct{}
-	access     sync.Mutex
-	Server     *core.Instance
-	users      *UserMap
-	ihm        inbound.Manager
-	ohm        outbound.Manager
-	dispatcher *dispatcher.DefaultDispatcher
+type protocolRuntime interface {
+	Start() error
+	Stop() error
+	AddUsers([]panel.UserInfo) (int, error)
+	DelUsers([]panel.UserInfo) error
+	Traffic(int) ([]panel.UserTraffic, error)
+	CommitTraffic([]panel.UserTraffic)
 }
 
-type UserMap struct {
-	uidMap  map[string]int
-	mapLock sync.RWMutex
+type V2Core struct {
+	Config   *conf.Conf
+	ReloadCh chan struct{}
+
+	mu       sync.RWMutex
+	runtimes map[string]protocolRuntime
 }
 
 func New(config *conf.Conf) *V2Core {
-	core := &V2Core{
-		Config: config,
-		users: &UserMap{
-			uidMap: make(map[string]int),
-		},
+	return &V2Core{
+		Config:   config,
+		runtimes: make(map[string]protocolRuntime),
 	}
-	return core
 }
 
-func (v *V2Core) Start(infos []*panel.NodeInfo) error {
-	v.access.Lock()
-	defer v.access.Unlock()
-	v.Server = getCore(v.Config, infos)
-	if err := v.Server.Start(); err != nil {
-		return err
-	}
-	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
-	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
-	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+func (v *V2Core) Start(_ []*panel.NodeInfo) error {
 	return nil
 }
 
 func (v *V2Core) Close() error {
-	v.access.Lock()
-	defer v.access.Unlock()
-	v.Config = nil
-	v.ihm = nil
-	v.ohm = nil
-	v.dispatcher = nil
-	err := v.Server.Close()
-	if err != nil {
-		return err
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	var firstErr error
+	for tag, runtime := range v.runtimes {
+		if err := runtime.Stop(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("stop runtime %s: %w", tag, err)
+		}
 	}
+	v.runtimes = make(map[string]protocolRuntime)
+	return firstErr
+}
+
+func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if _, exists := v.runtimes[tag]; exists {
+		return fmt.Errorf("node %s already exists", tag)
+	}
+
+	var runtime protocolRuntime
+	switch info.Type {
+	case "mieru":
+		runtime = newMieruRuntime(tag, info)
+	default:
+		return fmt.Errorf("unsupported protocol: %s", info.Type)
+	}
+	v.runtimes[tag] = runtime
 	return nil
 }
 
-func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
-	// Log Config
-	coreLogConfig := &coreConf.LogConfig{
-		LogLevel:  c.LogConfig.Level,
-		AccessLog: c.LogConfig.Access,
-		ErrorLog:  c.LogConfig.Output,
-	}
-	// Custom config
-	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(infos)
-	if err != nil {
-		log.WithField("err", err).Panic("failed to build custom config")
-	}
-	// Inbound config
-	var inBoundConfig []*core.InboundHandlerConfig
+func (v *V2Core) DelNode(tag string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 
-	// Policy config
-	levelPolicyConfig := &coreConf.Policy{
-		StatsUserUplink:   true,
-		StatsUserDownlink: true,
-		Handshake:         proto.Uint32(4),
-		ConnectionIdle:    proto.Uint32(120),
-		UplinkOnly:        proto.Uint32(2),
-		DownlinkOnly:      proto.Uint32(4),
-		BufferSize:        proto.Int32(128),
+	runtime, exists := v.runtimes[tag]
+	if !exists {
+		return nil
 	}
-	corePolicyConfig := &coreConf.PolicyConfig{}
-	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
-	policyConfig, _ := corePolicyConfig.Build()
-	// Build Xray conf
-	config := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(coreLogConfig.Build()),
-			serial.ToTypedMessage(&dispatcher.Config{}),
-			serial.ToTypedMessage(&stats.Config{}),
-			serial.ToTypedMessage(&proxyman.InboundConfig{}),
-			serial.ToTypedMessage(&proxyman.OutboundConfig{}),
-			serial.ToTypedMessage(policyConfig),
-			serial.ToTypedMessage(dnsConfig),
-			serial.ToTypedMessage(routeConfig),
-		},
-		Inbound:  inBoundConfig,
-		Outbound: outBoundConfig,
-	}
-	server, err := core.New(config)
+	delete(v.runtimes, tag)
+	return runtime.Stop()
+}
+
+func (v *V2Core) AddUsers(params *AddUsersParams) (int, error) {
+	runtime, err := v.runtime(params.Tag)
 	if err != nil {
-		log.WithField("err", err).Panic("failed to create instance")
+		return 0, err
 	}
-	log.Info("Xray Core Version: ", core.Version())
-	return server
+	return runtime.AddUsers(params.Users)
+}
+
+func (v *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
+	runtime, err := v.runtime(tag)
+	if err != nil {
+		return err
+	}
+	return runtime.DelUsers(users)
+}
+
+func (v *V2Core) GetUserTrafficSlice(tag string, minTraffic int) ([]panel.UserTraffic, error) {
+	runtime, err := v.runtime(tag)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.Traffic(minTraffic)
+}
+
+func (v *V2Core) CommitUserTraffic(tag string, traffic []panel.UserTraffic) {
+	runtime, err := v.runtime(tag)
+	if err == nil {
+		runtime.CommitTraffic(traffic)
+	}
+}
+
+func (v *V2Core) runtime(tag string) (protocolRuntime, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	runtime, exists := v.runtimes[tag]
+	if !exists {
+		return nil, fmt.Errorf("node %s does not exist", tag)
+	}
+	return runtime, nil
 }

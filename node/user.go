@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
+	panel "github.com/limo13660/daonode/api/v2board"
 	log "github.com/sirupsen/logrus"
-	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
@@ -27,6 +27,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				return err
 			}
 		} else {
+			c.server.CommitUserTraffic(c.tag, userTraffic)
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
 		}

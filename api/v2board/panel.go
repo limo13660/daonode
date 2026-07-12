@@ -9,7 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/wyx2685/v2node/conf"
+	"github.com/limo13660/daonode/conf"
 )
 
 // Panel is the interface for different panel's api.
@@ -33,7 +33,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		retryCount = *c.RetryCount
 	}
 	client.SetRetryCount(retryCount)
-	client.SetHeader("User-Agent", fmt.Sprintf("v2node go-resty/%s (https://github.com/go-resty/resty)", resty.Version))
+	client.SetHeader("User-Agent", fmt.Sprintf("daonode go-resty/%s (https://github.com/go-resty/resty)", resty.Version))
 	if c.Timeout > 0 {
 		client.SetTimeout(time.Duration(c.Timeout) * time.Second)
 	} else {
@@ -50,7 +50,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	client.SetBaseURL(c.APIHost)
 	// set params
 	client.SetQueryParams(map[string]string{
-		"node_type": "v2node",
+		"node_type": "daonode",
 		"node_id":   strconv.Itoa(c.NodeID),
 		"token":     c.Key,
 	})

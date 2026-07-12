@@ -63,9 +63,6 @@ if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
         echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
     fi
-    if [[ ${os_version} -eq 7 ]]; then
-        echo -e "${red}注意： CentOS 7 无法使用hysteria1/2协议！${plain}\n"
-    fi
 elif [[ x"${release}" == x"ubuntu" ]]; then
     if [[ ${os_version} -lt 16 ]]; then
         echo -e "${red}请使用 Ubuntu 16 或更高版本的系统！${plain}\n" && exit 1
@@ -93,7 +90,7 @@ confirm() {
 }
 
 confirm_restart() {
-    confirm "是否重启v2node" "y"
+    confirm "是否重启daonode" "y"
     if [[ $? == 0 ]]; then
         restart
     else
@@ -107,7 +104,7 @@ before_show_menu() {
 }
 
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh)
+    bash <(curl -Ls https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh)
     if [[ $? == 0 ]]; then
         if [[ $# == 0 ]]; then
             start
@@ -123,9 +120,9 @@ update() {
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh) $version
+    bash <(curl -Ls https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh) $version
     if [[ $? == 0 ]]; then
-        echo -e "${green}更新完成，已自动重启 v2node，请使用 v2node log 查看运行日志${plain}"
+        echo -e "${green}更新完成，已自动重启 daonode，请使用 daonode log 查看运行日志${plain}"
         exit
     fi
 
@@ -135,17 +132,17 @@ update() {
 }
 
 config() {
-    echo "v2node在修改配置后会自动尝试重启"
-    vi /etc/v2node/config.json
+    echo "daonode在修改配置后会自动尝试重启"
+    vi /etc/daonode/config.json
     sleep 2
     restart
     check_status
     case $? in
         0)
-            echo -e "v2node状态: ${green}已运行${plain}"
+            echo -e "daonode状态: ${green}已运行${plain}"
             ;;
         1)
-            echo -e "检测到您未启动v2node或v2node自动重启失败，是否查看日志？[Y/n]" && echo
+            echo -e "检测到您未启动daonode或daonode自动重启失败，是否查看日志？[Y/n]" && echo
             read -e -rp "(默认: y):" yn
             [[ -z ${yn} ]] && yn="y"
             if [[ ${yn} == [Yy] ]]; then
@@ -153,12 +150,12 @@ config() {
             fi
             ;;
         2)
-            echo -e "v2node状态: ${red}未安装${plain}"
+            echo -e "daonode状态: ${red}未安装${plain}"
     esac
 }
 
 uninstall() {
-    confirm "确定要卸载 v2node 吗?" "n"
+    confirm "确定要卸载 daonode 吗?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
@@ -166,21 +163,21 @@ uninstall() {
         return 0
     fi
     if [[ x"${release}" == x"alpine" ]]; then
-        service v2node stop
-        rc-update del v2node
-        rm /etc/init.d/v2node -f
+        service daonode stop
+        rc-update del daonode
+        rm /etc/init.d/daonode -f
     else
-        systemctl stop v2node
-        systemctl disable v2node
-        rm /etc/systemd/system/v2node.service -f
+        systemctl stop daonode
+        systemctl disable daonode
+        rm /etc/systemd/system/daonode.service -f
         systemctl daemon-reload
         systemctl reset-failed
     fi
-    rm /etc/v2node/ -rf
-    rm /usr/local/v2node/ -rf
+    rm /etc/daonode/ -rf
+    rm /usr/local/daonode/ -rf
 
     echo ""
-    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/v2node -f${plain} 进行删除"
+    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/daonode -f${plain} 进行删除"
     echo ""
 
     if [[ $# == 0 ]]; then
@@ -192,19 +189,19 @@ start() {
     check_status
     if [[ $? == 0 ]]; then
         echo ""
-        echo -e "${green}v2node已运行，无需再次启动，如需重启请选择重启${plain}"
+        echo -e "${green}daonode已运行，无需再次启动，如需重启请选择重启${plain}"
     else
         if [[ x"${release}" == x"alpine" ]]; then
-            service v2node start
+            service daonode start
         else
-            systemctl start v2node
+            systemctl start daonode
         fi
         sleep 2
         check_status
         if [[ $? == 0 ]]; then
-            echo -e "${green}v2node 启动成功，请使用 v2node log 查看运行日志${plain}"
+            echo -e "${green}daonode 启动成功，请使用 daonode log 查看运行日志${plain}"
         else
-            echo -e "${red}v2node可能启动失败，请稍后使用 v2node log 查看日志信息${plain}"
+            echo -e "${red}daonode可能启动失败，请稍后使用 daonode log 查看日志信息${plain}"
         fi
     fi
 
@@ -215,16 +212,16 @@ start() {
 
 stop() {
     if [[ x"${release}" == x"alpine" ]]; then
-        service v2node stop
+        service daonode stop
     else
-        systemctl stop v2node
+        systemctl stop daonode
     fi
     sleep 2
     check_status
     if [[ $? == 1 ]]; then
-        echo -e "${green}v2node 停止成功${plain}"
+        echo -e "${green}daonode 停止成功${plain}"
     else
-        echo -e "${red}v2node停止失败，可能是因为停止时间超过了两秒，请稍后查看日志信息${plain}"
+        echo -e "${red}daonode停止失败，可能是因为停止时间超过了两秒，请稍后查看日志信息${plain}"
     fi
 
     if [[ $# == 0 ]]; then
@@ -234,16 +231,16 @@ stop() {
 
 restart() {
     if [[ x"${release}" == x"alpine" ]]; then
-        service v2node restart
+        service daonode restart
     else
-        systemctl restart v2node
+        systemctl restart daonode
     fi
     sleep 2
     check_status
     if [[ $? == 0 ]]; then
-        echo -e "${green}v2node 重启成功，请使用 v2node log 查看运行日志${plain}"
+        echo -e "${green}daonode 重启成功，请使用 daonode log 查看运行日志${plain}"
     else
-        echo -e "${red}v2node可能启动失败，请稍后使用 v2node log 查看日志信息${plain}"
+        echo -e "${red}daonode可能启动失败，请稍后使用 daonode log 查看日志信息${plain}"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -252,9 +249,9 @@ restart() {
 
 status() {
     if [[ x"${release}" == x"alpine" ]]; then
-        service v2node status
+        service daonode status
     else
-        systemctl status v2node --no-pager -l
+        systemctl status daonode --no-pager -l
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -263,14 +260,14 @@ status() {
 
 enable() {
     if [[ x"${release}" == x"alpine" ]]; then
-        rc-update add v2node
+        rc-update add daonode
     else
-        systemctl enable v2node
+        systemctl enable daonode
     fi
     if [[ $? == 0 ]]; then
-        echo -e "${green}v2node 设置开机自启成功${plain}"
+        echo -e "${green}daonode 设置开机自启成功${plain}"
     else
-        echo -e "${red}v2node 设置开机自启失败${plain}"
+        echo -e "${red}daonode 设置开机自启失败${plain}"
     fi
 
     if [[ $# == 0 ]]; then
@@ -280,14 +277,14 @@ enable() {
 
 disable() {
     if [[ x"${release}" == x"alpine" ]]; then
-        rc-update del v2node
+        rc-update del daonode
     else
-        systemctl disable v2node
+        systemctl disable daonode
     fi
     if [[ $? == 0 ]]; then
-        echo -e "${green}v2node 取消开机自启成功${plain}"
+        echo -e "${green}daonode 取消开机自启成功${plain}"
     else
-        echo -e "${red}v2node 取消开机自启失败${plain}"
+        echo -e "${red}daonode 取消开机自启失败${plain}"
     fi
 
     if [[ $# == 0 ]]; then
@@ -299,7 +296,7 @@ show_log() {
     if [[ x"${release}" == x"alpine" ]]; then
         echo -e "${red}alpine系统暂不支持日志查看${plain}\n" && exit 1
     else
-        journalctl -u v2node.service -e --no-pager -f
+        journalctl -u daonode.service -e --no-pager -f
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -307,31 +304,31 @@ show_log() {
 }
 
 update_shell() {
-    wget -O /usr/bin/v2node -N --no-check-certificate https://raw.githubusercontent.com/wyx2685/v2node/master/script/v2node.sh
+    wget -O /usr/bin/daonode -N --no-check-certificate https://raw.githubusercontent.com/limo13660/daonode/main/script/daonode.sh
     if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
         before_show_menu
     else
-        chmod +x /usr/bin/v2node
+        chmod +x /usr/bin/daonode
         echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
     fi
 }
 
 # 0: running, 1: not running, 2: not installed
 check_status() {
-    if [[ ! -f /usr/local/v2node/v2node ]]; then
+    if [[ ! -f /usr/local/daonode/daonode ]]; then
         return 2
     fi
     if [[ x"${release}" == x"alpine" ]]; then
-        temp=$(service v2node status | awk '{print $3}')
+        temp=$(service daonode status | awk '{print $3}')
         if [[ x"${temp}" == x"started" ]]; then
             return 0
         else
             return 1
         fi
     else
-        temp=$(systemctl status v2node | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
+        temp=$(systemctl status daonode | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
         if [[ x"${temp}" == x"running" ]]; then
             return 0
         else
@@ -342,14 +339,14 @@ check_status() {
 
 check_enabled() {
     if [[ x"${release}" == x"alpine" ]]; then
-        temp=$(rc-update show | grep v2node)
+        temp=$(rc-update show | grep daonode)
         if [[ x"${temp}" == x"" ]]; then
             return 1
         else
             return 0
         fi
     else
-        temp=$(systemctl is-enabled v2node)
+        temp=$(systemctl is-enabled daonode)
         if [[ x"${temp}" == x"enabled" ]]; then
             return 0
         else
@@ -362,7 +359,7 @@ check_uninstall() {
     check_status
     if [[ $? != 2 ]]; then
         echo ""
-        echo -e "${red}v2node已安装，请不要重复安装${plain}"
+        echo -e "${red}daonode已安装，请不要重复安装${plain}"
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
@@ -376,7 +373,7 @@ check_install() {
     check_status
     if [[ $? == 2 ]]; then
         echo ""
-        echo -e "${red}请先安装v2node${plain}"
+        echo -e "${red}请先安装daonode${plain}"
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
@@ -390,15 +387,15 @@ show_status() {
     check_status
     case $? in
         0)
-            echo -e "v2node状态: ${green}已运行${plain}"
+            echo -e "daonode状态: ${green}已运行${plain}"
             show_enable_status
             ;;
         1)
-            echo -e "v2node状态: ${yellow}未运行${plain}"
+            echo -e "daonode状态: ${yellow}未运行${plain}"
             show_enable_status
             ;;
         2)
-            echo -e "v2node状态: ${red}未安装${plain}"
+            echo -e "daonode状态: ${red}未安装${plain}"
     esac
 }
 
@@ -411,22 +408,22 @@ show_enable_status() {
     fi
 }
 
-show_v2node_version() {
-    echo -n "v2node 版本："
-    /usr/local/v2node/v2node version
+show_daonode_version() {
+    echo -n "daonode 版本："
+    /usr/local/daonode/daonode version
     echo ""
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
-generate_v2node_config() {
+generate_daonode_config() {
         local api_host="$1"
         local node_id="$2"
         local api_key="$3"
 
-        mkdir -p /etc/v2node >/dev/null 2>&1
-        cat > /etc/v2node/config.json <<EOF
+        mkdir -p /etc/daonode >/dev/null 2>&1
+        cat > /etc/daonode/config.json <<EOF
 {
     "Log": {
         "Level": "warning",
@@ -443,19 +440,19 @@ generate_v2node_config() {
     ]
 }
 EOF
-        echo -e "${green}V2node 配置文件生成完成,正在重新启动服务${plain}"
+        echo -e "${green}DaoNode 配置文件生成完成,正在重新启动服务${plain}"
         if [[ x"${release}" == x"alpine" ]]; then
-            service v2node restart
+            service daonode restart
         else
-            systemctl restart v2node
+            systemctl restart daonode
         fi
         sleep 2
         check_status
         echo -e ""
         if [[ $? == 0 ]]; then
-            echo -e "${green}v2node 重启成功${plain}"
+            echo -e "${green}daonode 重启成功${plain}"
         else
-            echo -e "${red}v2node 可能启动失败，请使用 v2node log 查看日志信息${plain}"
+            echo -e "${red}daonode 可能启动失败，请使用 daonode log 查看日志信息${plain}"
         fi
 }
 
@@ -469,7 +466,7 @@ generate_config_file() {
     read -rp "节点通讯密钥: " api_key
 
     # 生成配置文件（覆盖可能从包中复制的模板）
-    generate_v2node_config "$api_host" "$node_id" "$api_key"
+    generate_daonode_config "$api_host" "$node_id" "$api_key"
 }
 
 # 放开防火墙端口
@@ -490,48 +487,48 @@ open_ports() {
 }
 
 show_usage() {
-    echo "v2node 管理脚本使用方法: "
+    echo "daonode 管理脚本使用方法: "
     echo "------------------------------------------"
-    echo "v2node              - 显示管理菜单 (功能更多)"
-    echo "v2node start        - 启动 v2node"
-    echo "v2node stop         - 停止 v2node"
-    echo "v2node restart      - 重启 v2node"
-    echo "v2node status       - 查看 v2node 状态"
-    echo "v2node enable       - 设置 v2node 开机自启"
-    echo "v2node disable      - 取消 v2node 开机自启"
-    echo "v2node log          - 查看 v2node 日志"
-    echo "v2node x25519       - 生成 x25519 密钥"
-    echo "v2node generate     - 生成 v2node 配置文件"
-    echo "v2node update       - 更新 v2node"
-    echo "v2node update x.x.x - 安装 v2node 指定版本"
-    echo "v2node install      - 安装 v2node"
-    echo "v2node uninstall    - 卸载 v2node"
-    echo "v2node version      - 查看 v2node 版本"
+    echo "daonode              - 显示管理菜单 (功能更多)"
+    echo "daonode start        - 启动 daonode"
+    echo "daonode stop         - 停止 daonode"
+    echo "daonode restart      - 重启 daonode"
+    echo "daonode status       - 查看 daonode 状态"
+    echo "daonode enable       - 设置 daonode 开机自启"
+    echo "daonode disable      - 取消 daonode 开机自启"
+    echo "daonode log          - 查看 daonode 日志"
+    echo "daonode x25519       - 生成 x25519 密钥"
+    echo "daonode generate     - 生成 daonode 配置文件"
+    echo "daonode update       - 更新 daonode"
+    echo "daonode update x.x.x - 安装 daonode 指定版本"
+    echo "daonode install      - 安装 daonode"
+    echo "daonode uninstall    - 卸载 daonode"
+    echo "daonode version      - 查看 daonode 版本"
     echo "------------------------------------------"
 }
 
 show_menu() {
     echo -e "
-  ${green}v2node 后端管理脚本，${plain}${red}不适用于docker${plain}
---- https://github.com/wyx2685/v2node ---
+  ${green}daonode 后端管理脚本，${plain}${red}不适用于docker${plain}
+--- https://github.com/limo13660/daonode ---
   ${green}0.${plain} 修改配置
 ————————————————
-  ${green}1.${plain} 安装 v2node
-  ${green}2.${plain} 更新 v2node
-  ${green}3.${plain} 卸载 v2node
+  ${green}1.${plain} 安装 daonode
+  ${green}2.${plain} 更新 daonode
+  ${green}3.${plain} 卸载 daonode
 ————————————————
-  ${green}4.${plain} 启动 v2node
-  ${green}5.${plain} 停止 v2node
-  ${green}6.${plain} 重启 v2node
-  ${green}7.${plain} 查看 v2node 状态
-  ${green}8.${plain} 查看 v2node 日志
+  ${green}4.${plain} 启动 daonode
+  ${green}5.${plain} 停止 daonode
+  ${green}6.${plain} 重启 daonode
+  ${green}7.${plain} 查看 daonode 状态
+  ${green}8.${plain} 查看 daonode 日志
 ————————————————
-  ${green}9.${plain} 设置 v2node 开机自启
-  ${green}10.${plain} 取消 v2node 开机自启
+  ${green}9.${plain} 设置 daonode 开机自启
+  ${green}10.${plain} 取消 daonode 开机自启
 ————————————————
-  ${green}11.${plain} 查看 v2node 版本
-  ${green}12.${plain} 升级 v2node 维护脚本
-  ${green}13.${plain} 生成 v2node 配置文件
+  ${green}11.${plain} 查看 daonode 版本
+  ${green}12.${plain} 升级 daonode 维护脚本
+  ${green}13.${plain} 生成 daonode 配置文件
   ${green}14.${plain} 放行 VPS 的所有网络端口
   ${green}15.${plain} 退出脚本
  "
@@ -551,7 +548,7 @@ show_menu() {
         8) check_install && show_log ;;
         9) check_install && enable ;;
         10) check_install && disable ;;
-        11) check_install && show_v2node_version ;;
+        11) check_install && show_daonode_version ;;
         12) update_shell ;;
         13) generate_config_file ;;
         14) open_ports ;;
@@ -575,7 +572,7 @@ if [[ $# > 0 ]]; then
         "generate") generate_config_file ;;
         "install") check_uninstall 0 && install 0 ;;
         "uninstall") check_install 0 && uninstall 0 ;;
-        "version") check_install 0 && show_v2node_version 0 ;;
+        "version") check_install 0 && show_daonode_version 0 ;;
         "update_shell") update_shell ;;
         *) show_usage
     esac
