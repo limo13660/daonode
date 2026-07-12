@@ -29,6 +29,9 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if info == nil {
+			return nil, fmt.Errorf("panel returned no node info for [%s-%d]", node.APIHost, node.NodeID)
+		}
 		n.controllers[i] = NewController(p, &node, info)
 		n.NodeInfos[i] = info
 	}
@@ -39,6 +42,11 @@ func (n *Node) Start(nodes []conf.NodeConfig, core *core.V2Core) error {
 	for i, node := range nodes {
 		err := n.controllers[i].Start(core)
 		if err != nil {
+			for j := i - 1; j >= 0; j-- {
+				if closeErr := n.controllers[j].Close(); closeErr != nil {
+					log.Errorf("rollback controller failed: %v", closeErr)
+				}
+			}
 			return fmt.Errorf("start node controller [%s-%d] error: %s",
 				node.APIHost,
 				node.NodeID,
@@ -49,13 +57,15 @@ func (n *Node) Start(nodes []conf.NodeConfig, core *core.V2Core) error {
 }
 
 func (n *Node) Close() error {
-	var err error
+	var firstErr error
 	for _, c := range n.controllers {
-		if err = c.Close(); err != nil {
+		if err := c.Close(); err != nil {
 			log.Errorf("close controller failed: %v", err)
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	n.controllers = nil
-	return nil
+	return firstErr
 }

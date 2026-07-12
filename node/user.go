@@ -15,9 +15,17 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
-	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
-	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
+	trafficMin := reportmin
+	if devicemin < trafficMin {
+		trafficMin = devicemin
+	}
+	userTraffic, err := c.server.GetUserTrafficSlice(c.tag, trafficMin)
+	if err != nil {
+		return err
+	}
+	reportTraffic := filterTrafficByMinimum(userTraffic, reportmin)
+	if len(reportTraffic) > 0 {
+		err = c.apiClient.ReportUserTraffic(ctx, reportTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -27,8 +35,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				return err
 			}
 		} else {
-			c.server.CommitUserTraffic(c.tag, userTraffic)
-			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
+			c.server.CommitUserTraffic(c.tag, reportTraffic)
+			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(reportTraffic))
 			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
 		}
 	}
@@ -39,19 +47,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			"err": err,
 		}).Info("Get online device failed")
 	} else if len(*onlineDevice) > 0 {
-		var result []panel.OnlineUser
-		var nocountUID = make(map[int]struct{})
-		for _, traffic := range userTraffic {
-			total := traffic.Upload + traffic.Download
-			if total < int64(devicemin*1000) {
-				nocountUID[traffic.UID] = struct{}{}
-			}
-		}
-		for _, online := range *onlineDevice {
-			if _, ok := nocountUID[online.UID]; !ok {
-				result = append(result, online)
-			}
-		}
+		result := filterOnlineUsers(*onlineDevice, userTraffic, devicemin)
 		data := make(map[int][]string)
 		for _, onlineuser := range result {
 			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
@@ -73,6 +69,38 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	}
 
 	return nil
+}
+
+func filterTrafficByMinimum(traffic []panel.UserTraffic, minimum int) []panel.UserTraffic {
+	if minimum <= 0 {
+		return traffic
+	}
+	threshold := int64(minimum * 1000)
+	result := make([]panel.UserTraffic, 0, len(traffic))
+	for _, item := range traffic {
+		if item.Upload+item.Download > threshold {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func filterOnlineUsers(online []panel.OnlineUser, traffic []panel.UserTraffic, minimum int) []panel.OnlineUser {
+	if minimum <= 0 {
+		return online
+	}
+	threshold := int64(minimum * 1000)
+	totals := make(map[int]int64, len(traffic))
+	for _, item := range traffic {
+		totals[item.UID] = item.Upload + item.Download
+	}
+	result := make([]panel.OnlineUser, 0, len(online))
+	for _, item := range online {
+		if totals[item.UID] > threshold {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {

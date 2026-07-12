@@ -14,6 +14,7 @@ daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的
 - 客户端与服务端独立 Traffic Pattern
 - Mieru User Hint（可选强制校验，默认兼容旧客户端）
 - 用户动态增删、限速、在线状态和流量上报
+- 用户到期、续费、流量重置和套餐限制变更使用单一监控任务，并按面板配置的轮询周期同步
 - DaoBoard 路由组、DNS 规则、域名/IP/端口/协议阻断
 - 兼容 v2node 的 `geoip.dat`、`geosite.dat` 路由数据格式
 - 配置热更新和安全退出

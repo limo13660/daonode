@@ -88,42 +88,40 @@ func (v *V2Core) DelNode(tag string) error {
 }
 
 func (v *V2Core) AddUsers(params *AddUsersParams) (int, error) {
-	runtime, err := v.runtime(params.Tag)
-	if err != nil {
-		return 0, err
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	runtime, exists := v.runtimes[params.Tag]
+	if !exists {
+		return 0, fmt.Errorf("node %s does not exist", params.Tag)
 	}
 	return runtime.AddUsers(params.Users)
 }
 
 func (v *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
-	runtime, err := v.runtime(tag)
-	if err != nil {
-		return err
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	runtime, exists := v.runtimes[tag]
+	if !exists {
+		return fmt.Errorf("node %s does not exist", tag)
 	}
 	return runtime.DelUsers(users)
 }
 
 func (v *V2Core) GetUserTrafficSlice(tag string, minTraffic int) ([]panel.UserTraffic, error) {
-	runtime, err := v.runtime(tag)
-	if err != nil {
-		return nil, err
-	}
-	return runtime.Traffic(minTraffic)
-}
-
-func (v *V2Core) CommitUserTraffic(tag string, traffic []panel.UserTraffic) {
-	runtime, err := v.runtime(tag)
-	if err == nil {
-		runtime.CommitTraffic(traffic)
-	}
-}
-
-func (v *V2Core) runtime(tag string) (protocolRuntime, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	runtime, exists := v.runtimes[tag]
 	if !exists {
 		return nil, fmt.Errorf("node %s does not exist", tag)
 	}
-	return runtime, nil
+	return runtime.Traffic(minTraffic)
+}
+
+func (v *V2Core) CommitUserTraffic(tag string, traffic []panel.UserTraffic) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	runtime, exists := v.runtimes[tag]
+	if exists {
+		runtime.CommitTraffic(traffic)
+	}
 }

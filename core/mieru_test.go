@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	panel "github.com/limo13660/daonode/api/v2board"
+	"github.com/limo13660/daonode/limiter"
 )
 
 func TestMieruTrafficCommit(t *testing.T) {
@@ -28,10 +29,10 @@ func TestMieruTrafficCommit(t *testing.T) {
 		Common: &panel.CommonNode{UserNamePrefix: "testnode"},
 	})
 	user := panel.UserInfo{Id: 7, Uuid: "test-password"}
-	runtime.users[user.Uuid] = user
+	runtime.users[user.Id] = user
 	userName := runtime.userName(user.Id)
-	committedTraffic.Delete(userName)
-	t.Cleanup(func() { committedTraffic.Delete(userName) })
+	committedTraffic.Delete(runtime.trafficKey(user.Id))
+	t.Cleanup(func() { committedTraffic.Delete(runtime.trafficKey(user.Id)) })
 
 	group := fmt.Sprintf(metrics.UserMetricGroupFormat, userName)
 	metrics.RegisterMetric(group, metrics.UserMetricUploadBytes, metrics.COUNTER_TIME_SERIES).Add(120)
@@ -204,17 +205,22 @@ func TestMieruOfficialTrafficPatternValidation(t *testing.T) {
 	}
 }
 
-func TestMieruGeneratedSixteenCharacterTrafficPattern(t *testing.T) {
-	encoded := "CKPSvyIqBAgAEAA="
-	if len(encoded) != 16 {
-		t.Fatalf("generated traffic pattern length = %d, want 16", len(encoded))
-	}
+func TestMieruGeneratedSeedTrafficPattern(t *testing.T) {
+	encoded := "CCo="
 	pattern, err := trafficpattern.Decode(encoded)
 	if err != nil {
 		t.Fatalf("generated traffic pattern decode failed: %v", err)
 	}
 	if err := trafficpattern.Validate(pattern); err != nil {
 		t.Fatalf("generated traffic pattern validation failed: %v", err)
+	}
+	config, err := trafficpattern.NewConfig(pattern)
+	if err != nil {
+		t.Fatalf("generate implicit traffic pattern: %v", err)
+	}
+	effective := config.Effective()
+	if effective.GetSeed() != 42 || effective.GetNonce() == nil || effective.GetPadding() == nil {
+		t.Fatalf("effective traffic pattern was not generated from seed: %v", effective)
 	}
 }
 
@@ -259,7 +265,8 @@ func TestMieruRuntimeTCP(t *testing.T) {
 	}
 	runtime := newMieruRuntime("integration", info)
 	user := panel.UserInfo{Id: 12, Uuid: "integration-password"}
-	runtime.users[user.Uuid] = user
+	installTestLimiter(t, runtime.tag, user)
+	runtime.users[user.Id] = user
 	if err := runtime.Start(); err != nil {
 		t.Fatalf("start Mieru runtime: %v", err)
 	}
@@ -318,6 +325,133 @@ func TestMieruRuntimeTCP(t *testing.T) {
 	}
 }
 
+func TestMieruRuntimeUserCanReconnectAfterRenewal(t *testing.T) {
+	echoListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start renewal echo listener: %v", err)
+	}
+	defer echoListener.Close()
+	go func() {
+		for {
+			conn, acceptErr := echoListener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}()
+		}
+	}()
+
+	proxyPort := freeTCPPort(t)
+	info := &panel.NodeInfo{
+		Id:   93,
+		Type: "mieru",
+		Common: &panel.CommonNode{
+			ServerPort:        proxyPort,
+			TransportProtocol: "TCP",
+			MTU:               1400,
+			UserNamePrefix:    "renewal",
+		},
+	}
+	runtime := newMieruRuntime("renewal", info)
+	user := panel.UserInfo{Id: 14, Uuid: "renewal-password"}
+	installTestLimiter(t, runtime.tag, user)
+	if _, err := runtime.AddUsers([]panel.UserInfo{user}); err != nil {
+		t.Fatalf("add initial renewal user: %v", err)
+	}
+	defer runtime.Stop()
+
+	transport := appctlpb.TransportProtocol_TCP
+	client := mieruclient.NewClient()
+	if err := client.Store(&mieruclient.ClientConfig{Profile: &appctlpb.ClientProfile{
+		ProfileName: proto.String("renewal"),
+		User: &appctlpb.User{
+			Name:     proto.String(runtime.userName(user.Id)),
+			Password: proto.String(user.Uuid),
+		},
+		Servers: []*appctlpb.ServerEndpoint{{
+			IpAddress: proto.String("127.0.0.1"),
+			PortBindings: []*appctlpb.PortBinding{{
+				Port:     proto.Int32(int32(proxyPort)),
+				Protocol: &transport,
+			}},
+		}},
+		Mtu: proto.Int32(1400),
+	}}); err != nil {
+		t.Fatalf("store renewal client config: %v", err)
+	}
+	if err := client.Start(); err != nil {
+		t.Fatalf("start renewal client: %v", err)
+	}
+	defer client.Stop()
+
+	target := echoListener.Addr().(*net.TCPAddr)
+	dialAndEcho := func(label string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn, dialErr := client.DialContext(ctx, model.NetAddrSpec{
+			AddrSpec: model.AddrSpec{IP: target.IP, Port: target.Port},
+			Net:      "tcp",
+		})
+		if dialErr != nil {
+			t.Fatalf("%s dial through Mieru: %v", label, dialErr)
+		}
+		defer conn.Close()
+		payload := []byte("daonode-" + label)
+		if _, writeErr := conn.Write(payload); writeErr != nil {
+			t.Fatalf("%s write through Mieru: %v", label, writeErr)
+		}
+		received := make([]byte, len(payload))
+		if _, readErr := io.ReadFull(conn, received); readErr != nil {
+			t.Fatalf("%s read through Mieru: %v", label, readErr)
+		}
+		if string(received) != string(payload) {
+			t.Fatalf("%s received %q, want %q", label, received, payload)
+		}
+	}
+
+	dialAndEcho("before-renewal")
+	activeCtx, activeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	activeConn, err := client.DialContext(activeCtx, model.NetAddrSpec{
+		AddrSpec: model.AddrSpec{IP: target.IP, Port: target.Port},
+		Net:      "tcp",
+	})
+	activeCancel()
+	if err != nil {
+		t.Fatalf("open active connection before expiry: %v", err)
+	}
+	if err := runtime.DelUsers([]panel.UserInfo{user}); err != nil {
+		t.Fatalf("remove expired user: %v", err)
+	}
+	_ = activeConn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, writeErr := activeConn.Write([]byte("expired")); writeErr == nil {
+		buffer := make([]byte, len("expired"))
+		if _, readErr := io.ReadFull(activeConn, buffer); readErr == nil {
+			t.Fatal("expired user's established connection remained usable")
+		}
+	}
+	activeConn.Close()
+	expiredCtx, expiredCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	expiredConn, expiredErr := client.DialContext(expiredCtx, model.NetAddrSpec{
+		AddrSpec: model.AddrSpec{IP: target.IP, Port: target.Port},
+		Net:      "tcp",
+	})
+	expiredCancel()
+	if expiredConn != nil {
+		expiredConn.Close()
+	}
+	if expiredErr == nil {
+		t.Fatal("expired Mieru user was still able to open a proxy connection")
+	}
+	if _, err := runtime.AddUsers([]panel.UserInfo{user}); err != nil {
+		t.Fatalf("re-add renewed user: %v", err)
+	}
+	dialAndEcho("after-renewal")
+}
+
 func TestMieruRuntimeUDP(t *testing.T) {
 	echoConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
@@ -363,7 +497,8 @@ func TestMieruRuntimeUDP(t *testing.T) {
 	}
 	runtime := newMieruRuntime("integration-udp", info)
 	user := panel.UserInfo{Id: 13, Uuid: "udp-password"}
-	runtime.users[user.Uuid] = user
+	installTestLimiter(t, runtime.tag, user)
+	runtime.users[user.Id] = user
 	if err := runtime.Start(); err != nil {
 		t.Fatalf("start UDP Mieru runtime: %v", err)
 	}
@@ -443,6 +578,13 @@ func TestMieruRuntimeUDP(t *testing.T) {
 	if len(wantPackets) != 0 {
 		t.Fatalf("%d UDP burst packets were lost", len(wantPackets))
 	}
+}
+
+func installTestLimiter(t *testing.T, tag string, user panel.UserInfo) {
+	t.Helper()
+	limiter.Init()
+	limiter.AddLimiter("mieru", tag, []panel.UserInfo{user}, map[int]int{})
+	t.Cleanup(func() { limiter.DeleteLimiter(tag) })
 }
 
 func freeTCPPort(t *testing.T) int {

@@ -21,6 +21,7 @@ type Controller struct {
 	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
+	active                  bool
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
@@ -57,13 +58,11 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to get user alive list: %s", err)
+		log.WithFields(log.Fields{"tag": node.Tag, "err": err}).Warn("Get initial alive list failed")
+		c.aliveMap = make(map[int]int)
 	}
 	c.tag = node.Tag
 
-	// add limiter
-	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
-	c.limiter = l
 	if node.Security == panel.Tls {
 		if err := c.requestCert(); err != nil {
 			return fmt.Errorf("request cert error: %s", err)
@@ -74,23 +73,26 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
+	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
 	added, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,
 		NodeInfo: node,
 	})
 	if err != nil {
+		limiter.DeleteLimiter(c.tag)
+		_ = c.server.DelNode(c.tag)
 		return fmt.Errorf("add users error: %s", err)
 	}
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	c.info = node
+	c.active = true
 	c.startTasks(node)
 	return nil
 }
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	limiter.DeleteLimiter(c.tag)
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
 	}
@@ -100,7 +102,14 @@ func (c *Controller) Close() error {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
-	err := c.server.DelNode(c.tag)
+	var err error
+	if c.active && c.server != nil && c.tag != "" {
+		err = c.server.DelNode(c.tag)
+	}
+	if c.active && c.tag != "" {
+		limiter.DeleteLimiter(c.tag)
+	}
+	c.active = false
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}

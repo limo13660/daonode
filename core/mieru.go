@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"strconv"
@@ -35,7 +36,7 @@ type trafficTotal struct {
 	download int64
 }
 
-var committedTraffic sync.Map // username -> trafficTotal
+var committedTraffic sync.Map // node tag + user ID -> trafficTotal
 
 const (
 	udpSocketBufferSize     = 16 << 20
@@ -73,16 +74,18 @@ type mieruRuntime struct {
 	server  mieruserver.Server
 	stopCh  chan struct{}
 	router  *routeEngine
-	users   map[string]panel.UserInfo
+	users   map[int]panel.UserInfo
 	pending map[int]trafficTotal
+	conns   map[int]map[net.Conn]struct{}
 }
 
 func newMieruRuntime(tag string, info *panel.NodeInfo) *mieruRuntime {
 	return &mieruRuntime{
 		tag:     tag,
 		info:    info,
-		users:   make(map[string]panel.UserInfo),
+		users:   make(map[int]panel.UserInfo),
 		pending: make(map[int]trafficTotal),
+		conns:   make(map[int]map[net.Conn]struct{}),
 	}
 }
 
@@ -95,16 +98,21 @@ func (m *mieruRuntime) Start() error {
 func (m *mieruRuntime) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.stopLocked()
+	return m.stopLocked(true)
 }
 
 func (m *mieruRuntime) AddUsers(users []panel.UserInfo) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := maps.Clone(m.users)
 	for _, user := range users {
-		m.users[user.Uuid] = user
+		m.users[user.Id] = user
 	}
 	if err := m.restartLocked(); err != nil {
+		m.users = previous
+		if recoverErr := m.restartLocked(); recoverErr != nil {
+			return 0, fmt.Errorf("apply users: %v; restore previous users: %w", err, recoverErr)
+		}
 		return 0, err
 	}
 	return len(users), nil
@@ -113,11 +121,22 @@ func (m *mieruRuntime) AddUsers(users []panel.UserInfo) (int, error) {
 func (m *mieruRuntime) DelUsers(users []panel.UserInfo) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous := maps.Clone(m.users)
+	previousPending := maps.Clone(m.pending)
 	for _, user := range users {
-		delete(m.users, user.Uuid)
+		m.closeUserConnectionsLocked(user.Id)
+		delete(m.users, user.Id)
 		delete(m.pending, user.Id)
 	}
-	return m.restartLocked()
+	if err := m.restartLocked(); err != nil {
+		m.users = previous
+		m.pending = previousPending
+		if recoverErr := m.restartLocked(); recoverErr != nil {
+			return fmt.Errorf("delete users: %v; restore previous users: %w", err, recoverErr)
+		}
+		return err
+	}
+	return nil
 }
 
 func (m *mieruRuntime) restartLocked() error {
@@ -125,11 +144,11 @@ func (m *mieruRuntime) restartLocked() error {
 	if err != nil {
 		return fmt.Errorf("configure routes: %w", err)
 	}
-	if err := m.stopLocked(); err != nil {
-		return err
-	}
-	m.router = router
 	if len(m.users) == 0 {
+		if err := m.stopLocked(false); err != nil {
+			return err
+		}
+		m.router = router
 		return nil
 	}
 
@@ -169,11 +188,16 @@ func (m *mieruRuntime) restartLocked() error {
 	if err := server.Store(serverConfig); err != nil {
 		return fmt.Errorf("store mieru config: %w", err)
 	}
+	if err := m.stopLocked(false); err != nil {
+		return err
+	}
 	if err := server.Start(); err != nil {
+		_ = server.Stop()
 		return fmt.Errorf("start mieru server: %w", err)
 	}
 
 	m.server = server
+	m.router = router
 	m.stopCh = make(chan struct{})
 	go m.acceptLoop(server, m.stopCh)
 	log.WithFields(log.Fields{
@@ -186,7 +210,12 @@ func (m *mieruRuntime) restartLocked() error {
 	return nil
 }
 
-func (m *mieruRuntime) stopLocked() error {
+func (m *mieruRuntime) stopLocked(closeConnections bool) error {
+	if closeConnections {
+		for uid := range m.conns {
+			m.closeUserConnectionsLocked(uid)
+		}
+	}
 	if m.server == nil {
 		return nil
 	}
@@ -217,25 +246,31 @@ func (m *mieruRuntime) acceptLoop(server mieruserver.Server, stopCh <-chan struc
 
 func (m *mieruRuntime) handleConnection(proxyConn net.Conn, request *model.Request) {
 	defer proxyConn.Close()
+	if request == nil {
+		return
+	}
 
 	userContext, ok := proxyConn.(apicommon.UserContext)
 	if !ok {
 		return
 	}
-	user, ok := m.userByName(userContext.UserName())
+	user, ok := m.userByNameAndTrack(userContext.UserName(), proxyConn)
 	if !ok {
 		return
 	}
+	defer m.untrackConnection(user.Id, proxyConn)
 
-	if nodeLimiter, err := limiter.GetLimiter(m.tag); err == nil {
-		ip := remoteIP(proxyConn.RemoteAddr())
-		bucket, reject := nodeLimiter.CheckLimit(format.UserTag(m.tag, user.Uuid), ip, true)
-		if reject {
-			return
-		}
-		if bucket != nil {
-			proxyConn = rate.NewConnRateLimiter(proxyConn, bucket)
-		}
+	nodeLimiter, err := limiter.GetLimiter(m.tag)
+	if err != nil {
+		return
+	}
+	ip := remoteIP(proxyConn.RemoteAddr())
+	bucket, reject := nodeLimiter.CheckLimit(format.UserTag(m.tag, user.Uuid), ip, true)
+	if reject {
+		return
+	}
+	if bucket != nil {
+		proxyConn = rate.NewConnRateLimiter(proxyConn, bucket)
 	}
 
 	switch request.Command {
@@ -342,7 +377,9 @@ func (m *mieruRuntime) handleUDP(proxyConn net.Conn, router *routeEngine) {
 			if err != nil {
 				continue
 			}
-			dst, err := router.resolveUDPAddr(context.Background(), addr, payload)
+			resolveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			dst, err := router.resolveUDPAddr(resolveCtx, addr, payload)
+			cancel()
 			if err != nil {
 				if !errors.Is(err, errRouteBlocked) {
 					log.WithFields(log.Fields{"tag": m.tag, "destination": addr.String(), "err": err}).Debug("Resolve UDP destination failed")
@@ -428,7 +465,7 @@ func (m *mieruRuntime) Traffic(minTraffic int) ([]panel.UserTraffic, error) {
 	for _, user := range m.users {
 		name := m.userName(user.Id)
 		current := loadMieruTraffic(name)
-		committedValue, _ := committedTraffic.LoadOrStore(name, trafficTotal{})
+		committedValue, _ := committedTraffic.LoadOrStore(m.trafficKey(user.Id), trafficTotal{})
 		committed := committedValue.(trafficTotal)
 		upload := current.upload - committed.upload
 		download := current.download - committed.download
@@ -458,7 +495,7 @@ func (m *mieruRuntime) CommitTraffic(traffic []panel.UserTraffic) {
 		if !ok {
 			continue
 		}
-		committedTraffic.Store(m.userName(item.UID), current)
+		committedTraffic.Store(m.trafficKey(item.UID), current)
 		delete(m.pending, item.UID)
 	}
 }
@@ -470,12 +507,59 @@ func (m *mieruRuntime) userName(uid int) string {
 func (m *mieruRuntime) userByName(name string) (panel.UserInfo, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	for _, user := range m.users {
-		if m.userName(user.Id) == name {
-			return user, true
-		}
+	return m.userByNameLocked(name)
+}
+
+func (m *mieruRuntime) userByNameLocked(name string) (panel.UserInfo, bool) {
+	prefix := m.info.Common.UserNamePrefix + "u"
+	idText, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return panel.UserInfo{}, false
 	}
-	return panel.UserInfo{}, false
+	uid, err := strconv.Atoi(idText)
+	if err != nil || m.userName(uid) != name {
+		return panel.UserInfo{}, false
+	}
+	user, ok := m.users[uid]
+	return user, ok
+}
+
+func (m *mieruRuntime) trafficKey(uid int) string {
+	return fmt.Sprintf("%s\x00%d", m.tag, uid)
+}
+
+func (m *mieruRuntime) userByNameAndTrack(name string, conn net.Conn) (panel.UserInfo, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	user, ok := m.userByNameLocked(name)
+	if !ok {
+		return panel.UserInfo{}, false
+	}
+	uid := user.Id
+	connections := m.conns[uid]
+	if connections == nil {
+		connections = make(map[net.Conn]struct{})
+		m.conns[uid] = connections
+	}
+	connections[conn] = struct{}{}
+	return user, true
+}
+
+func (m *mieruRuntime) untrackConnection(uid int, conn net.Conn) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	connections := m.conns[uid]
+	delete(connections, conn)
+	if len(connections) == 0 {
+		delete(m.conns, uid)
+	}
+}
+
+func (m *mieruRuntime) closeUserConnectionsLocked(uid int) {
+	for conn := range m.conns[uid] {
+		_ = conn.Close()
+	}
+	delete(m.conns, uid)
 }
 
 func (m *mieruRuntime) routerSnapshot() *routeEngine {

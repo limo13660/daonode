@@ -74,7 +74,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
+	return c.syncUsers(ctx)
+}
 
+func (c *Controller) syncUsers(ctx context.Context) (err error) {
 	// get user info
 	newU, err := c.apiClient.GetUserList(ctx)
 	if err != nil {
@@ -87,60 +90,55 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}).Error("Get user list failed")
 		return nil
 	}
-	// get user alive
-	newA, err := c.apiClient.GetUserAlive(ctx)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+	// node no changed, check users
+	if newU != nil {
+		deleted, added, modified := compareUserList(c.userList, newU)
+		if len(deleted) > 0 {
+			// have deleted users
+			err = c.server.DelUsers(deleted, c.tag, c.info)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Delete users failed")
+				return nil
+			}
 		}
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Get alive list failed")
-		return nil
+		if len(added) > 0 {
+			// have added users
+			_, err = c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      c.tag,
+				NodeInfo: c.info,
+				Users:    added,
+			})
+			if err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Add users failed")
+				return nil
+			}
+		}
+		if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
+			// update Limiter
+			c.limiter.UpdateUser(c.tag, added, deleted, modified)
+		}
+		c.userList = newU
+		log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
+	} else {
+		log.WithField("tag", c.tag).Debug("User list no change")
 	}
 
-	// update alive list
+	newA, aliveErr := c.apiClient.GetUserAlive(ctx)
+	if aliveErr != nil {
+		if errors.Is(aliveErr, context.Canceled) || errors.Is(aliveErr, context.DeadlineExceeded) {
+			return aliveErr
+		}
+		log.WithFields(log.Fields{"tag": c.tag, "err": aliveErr}).Error("Get alive list failed")
+		return nil
+	}
 	if newA != nil {
 		c.limiter.SetAliveList(newA)
 	}
-	// node no changed, check users
-	if newU == nil {
-		log.WithField("tag", c.tag).Debug("User list no change")
-		return nil
-	}
-	deleted, added, modified := compareUserList(c.userList, newU)
-	if len(deleted) > 0 {
-		// have deleted users
-		err = c.server.DelUsers(deleted, c.tag, c.info)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Delete users failed")
-			return nil
-		}
-	}
-	if len(added) > 0 {
-		// have added users
-		_, err = c.server.AddUsers(&vCore.AddUsersParams{
-			Tag:      c.tag,
-			NodeInfo: c.info,
-			Users:    added,
-		})
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Add users failed")
-			return nil
-		}
-	}
-	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
-		// update Limiter
-		c.limiter.UpdateUser(c.tag, added, deleted, modified)
-	}
-	c.userList = newU
-	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
 }

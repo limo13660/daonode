@@ -29,7 +29,7 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 				"protocol": " MIERU ", "server_port": 32000,
 				"transport_protocol": "TCP", "mtu": 1400,
 				"port_bindings":   []map[string]any{{"port": "32001", "server_port": "32001", "protocol": "UDP"}},
-				"traffic_pattern": "", "user_hint_is_mandatory": true,
+				"traffic_pattern": "CLrv1dcD", "user_hint_is_mandatory": true,
 				"username_prefix": "dpaneln9",
 				"routes": []map[string]any{{
 					"id": 5, "match": []string{"10.0.0.0/8"}, "action": "block_ip", "action_value": nil,
@@ -78,6 +78,9 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 	if len(node.Common.PortBindings) != 1 || node.Common.PortBindings[0].Protocol != "UDP" || !node.Common.UserHintIsMandatory {
 		t.Fatalf("GetNodeInfo() Mieru options = %+v", node.Common)
 	}
+	if node.Common.TrafficPattern != "CLrv1dcD" {
+		t.Fatalf("GetNodeInfo() traffic pattern = %q", node.Common.TrafficPattern)
+	}
 	if unchanged, err := client.GetNodeInfo(ctx); err != nil || unchanged != nil {
 		t.Fatalf("second GetNodeInfo() = %+v, %v", unchanged, err)
 	}
@@ -119,5 +122,26 @@ func TestDaoBoardRejectsUnsupportedProtocol(t *testing.T) {
 	}
 	if _, err := client.GetNodeInfo(context.Background()); err == nil || !strings.Contains(err.Error(), "unsupported protocol: future") {
 		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+}
+
+func TestPanelRejectsFailedUserResponses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"users":[]}`, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{
+		APIHost: server.URL, NodeID: 9, Key: "secret", Timeout: 5, RetryCount: &retryCount,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetUserList(context.Background()); err == nil {
+		t.Fatal("GetUserList() accepted HTTP 500")
+	}
+	if _, err := client.GetUserAlive(context.Background()); err == nil {
+		t.Fatal("GetUserAlive() accepted HTTP 500")
 	}
 }

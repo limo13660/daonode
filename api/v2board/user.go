@@ -52,6 +52,9 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	if r.StatusCode() == 304 {
 		return nil, nil
 	}
+	if r.IsError() {
+		return nil, fmt.Errorf("get user list failed with status %d", r.StatusCode())
+	}
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
 		decoder := msgpack.NewDecoder(r.RawResponse.Body)
@@ -101,19 +104,19 @@ func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+		return nil, err
 	}
-	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+	if r == nil || r.RawResponse == nil {
+		return nil, errors.New("received nil response or raw response")
 	}
 	defer r.RawResponse.Body.Close()
+	if r.IsError() {
+		return nil, fmt.Errorf("get alive list failed with status %d", r.StatusCode())
+	}
 	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		fmt.Printf("unmarshal user alive list error: %s", err)
+		return nil, fmt.Errorf("decode alive list: %w", err)
+	}
+	if c.AliveMap.Alive == nil {
 		c.AliveMap.Alive = make(map[int]int)
 	}
 
