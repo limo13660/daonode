@@ -29,15 +29,32 @@ type NodeInfo struct {
 }
 
 type CommonNode struct {
-	Protocol          string      `json:"protocol"`
-	ServerPort        int         `json:"server_port"`
-	TransportProtocol string      `json:"transport_protocol"`
-	MTU               int         `json:"mtu"`
-	UserNamePrefix    string      `json:"username_prefix"`
-	BaseConfig        *BaseConfig `json:"base_config"`
-	Tls               int         `json:"tls"`
-	TlsSettings       TlsSettings `json:"tls_settings"`
-	CertInfo          *CertInfo   `json:"-"`
+	Protocol            string        `json:"protocol"`
+	ServerPort          int           `json:"server_port"`
+	TransportProtocol   string        `json:"transport_protocol"`
+	PortBindings        []PortBinding `json:"port_bindings"`
+	MTU                 int           `json:"mtu"`
+	TrafficPattern      string        `json:"traffic_pattern"`
+	UserHintIsMandatory bool          `json:"user_hint_is_mandatory"`
+	UserNamePrefix      string        `json:"username_prefix"`
+	Routes              []Route       `json:"routes"`
+	BaseConfig          *BaseConfig   `json:"base_config"`
+	Tls                 int           `json:"tls"`
+	TlsSettings         TlsSettings   `json:"tls_settings"`
+	CertInfo            *CertInfo     `json:"-"`
+}
+
+type PortBinding struct {
+	Port       string `json:"port"`
+	ServerPort string `json:"server_port"`
+	Protocol   string `json:"protocol"`
+}
+
+type Route struct {
+	Id          int      `json:"id"`
+	Match       []string `json:"match"`
+	Action      string   `json:"action"`
+	ActionValue *string  `json:"action_value"`
 }
 
 type TlsSettings struct {
@@ -107,6 +124,25 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	}
 	if common.TransportProtocol == "" {
 		common.TransportProtocol = "TCP"
+	}
+	common.TransportProtocol = strings.ToUpper(common.TransportProtocol)
+	if common.TransportProtocol != "TCP" && common.TransportProtocol != "UDP" {
+		return nil, fmt.Errorf("invalid Mieru transport protocol: %s", common.TransportProtocol)
+	}
+	for i := range common.PortBindings {
+		binding := &common.PortBindings[i]
+		binding.Port = strings.TrimSpace(binding.Port)
+		binding.ServerPort = strings.TrimSpace(binding.ServerPort)
+		binding.Protocol = strings.ToUpper(strings.TrimSpace(binding.Protocol))
+		if binding.ServerPort == "" {
+			binding.ServerPort = binding.Port
+		}
+		if binding.Port == "" || binding.ServerPort == "" {
+			return nil, fmt.Errorf("Mieru port binding %d is empty", i)
+		}
+		if binding.Protocol != "TCP" && binding.Protocol != "UDP" {
+			return nil, fmt.Errorf("invalid Mieru port binding protocol: %s", binding.Protocol)
+		}
 	}
 	if common.MTU == 0 {
 		common.MTU = 1400

@@ -27,8 +27,13 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocol": "mieru", "server_port": 32000,
 				"transport_protocol": "TCP", "mtu": 1400,
+				"port_bindings":   []map[string]any{{"port": "32001", "server_port": "32001", "protocol": "UDP"}},
+				"traffic_pattern": "", "user_hint_is_mandatory": true,
 				"username_prefix": "dpaneln9",
-				"base_config":     map[string]any{"push_interval": 30, "pull_interval": 60},
+				"routes": []map[string]any{{
+					"id": 5, "match": []string{"10.0.0.0/8"}, "action": "block_ip", "action_value": nil,
+				}},
+				"base_config": map[string]any{"push_interval": 30, "pull_interval": 60},
 			})
 		case "/api/v1/server/UniProxy/user":
 			w.Header().Set("Content-Type", "application/json")
@@ -62,6 +67,12 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 	node, err := client.GetNodeInfo(ctx)
 	if err != nil || node == nil || node.Type != "mieru" || node.Common.ServerPort != 32000 {
 		t.Fatalf("GetNodeInfo() = %+v, %v", node, err)
+	}
+	if len(node.Common.Routes) != 1 || node.Common.Routes[0].Action != "block_ip" {
+		t.Fatalf("GetNodeInfo() routes = %+v", node.Common.Routes)
+	}
+	if len(node.Common.PortBindings) != 1 || node.Common.PortBindings[0].Protocol != "UDP" || !node.Common.UserHintIsMandatory {
+		t.Fatalf("GetNodeInfo() Mieru options = %+v", node.Common)
 	}
 	if unchanged, err := client.GetNodeInfo(ctx); err != nil || unchanged != nil {
 		t.Fatalf("second GetNodeInfo() = %+v, %v", unchanged, err)

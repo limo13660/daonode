@@ -195,6 +195,38 @@ install_base() {
     fi
 }
 
+optimize_network() {
+    if ! command -v sysctl >/dev/null 2>&1; then
+        return
+    fi
+
+    mkdir -p /etc/sysctl.d
+    cat > /etc/sysctl.d/99-daonode-network.conf <<EOF
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 32768
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+EOF
+
+    # Mieru officially recommends BBR for TCP. Its UDP transport already
+    # implements BBR inside the protocol and does not use this kernel setting.
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe tcp_bbr >/dev/null 2>&1 || true
+    fi
+    if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+        cat >> /etc/sysctl.d/99-daonode-network.conf <<EOF
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+    fi
+
+    rm -f /etc/sysctl.d/99-daonode-udp.conf
+    sysctl -p /etc/sysctl.d/99-daonode-network.conf >/dev/null 2>&1 || true
+}
+
 # 0: running, 1: not running, 2: not installed
 check_status() {
     if [[ ! -f /usr/local/daonode/daonode ]]; then
@@ -422,4 +454,5 @@ EOF
 parse_args "$@"
 echo -e "${green}开始安装${plain}"
 install_base
+optimize_network
 install_daonode "$VERSION_ARG"
