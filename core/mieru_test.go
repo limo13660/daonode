@@ -127,6 +127,41 @@ func TestMieruOfficialTrafficPattern(t *testing.T) {
 	}
 }
 
+func TestMieruFullTrafficPatternRoundTrip(t *testing.T) {
+	original := &appctlpb.TrafficPattern{
+		Seed:      proto.Int32(12345),
+		UnlockAll: proto.Bool(true),
+		TcpFragment: &appctlpb.TCPFragment{
+			Enable:     proto.Bool(true),
+			MaxSleepMs: proto.Int32(50),
+		},
+		Nonce: &appctlpb.NoncePattern{
+			Type:                appctlpb.NonceType_NONCE_TYPE_PRINTABLE.Enum(),
+			ApplyToAllUDPPacket: proto.Bool(true),
+			MinLen:              proto.Int32(4),
+			MaxLen:              proto.Int32(8),
+		},
+		Padding: &appctlpb.PaddingPattern{
+			MaxMiddlePaddingLen: proto.Int32(127),
+			MaxEndPaddingLen:    proto.Int32(255),
+		},
+	}
+	data, err := proto.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeMieruTrafficPattern(base64.StdEncoding.EncodeToString(data))
+	if err != nil {
+		t.Fatalf("decode full official traffic pattern: %v", err)
+	}
+	if !proto.Equal(original, decoded) {
+		t.Fatalf("decoded traffic pattern = %v, want %v", decoded, original)
+	}
+	if _, err := trafficpattern.NewConfig(decoded); err != nil {
+		t.Fatalf("official traffic pattern config: %v", err)
+	}
+}
+
 func TestMieruOfficialShareURLCompatibility(t *testing.T) {
 	pattern := &appctlpb.TrafficPattern{Seed: proto.Int32(42)}
 	data, err := proto.Marshal(pattern)

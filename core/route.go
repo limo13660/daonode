@@ -31,6 +31,7 @@ const (
 type routeEngine struct {
 	rules       []compiledRoute
 	udpDNSCache sync.Map
+	geoData     *geoDataStore
 }
 
 type udpDNSCacheEntry struct {
@@ -68,13 +69,20 @@ type portRange struct {
 }
 
 func newRouteEngine(routes []panel.Route) (*routeEngine, error) {
-	engine := &routeEngine{rules: make([]compiledRoute, 0, len(routes))}
+	return newRouteEngineWithGeoData(routes, newGeoDataStore())
+}
+
+func newRouteEngineWithGeoData(routes []panel.Route, geoData *geoDataStore) (*routeEngine, error) {
+	if geoData == nil {
+		geoData = newGeoDataStore()
+	}
+	engine := &routeEngine{rules: make([]compiledRoute, 0, len(routes)), geoData: geoData}
 	for _, route := range routes {
 		rule := compiledRoute{id: route.Id, action: strings.ToLower(strings.TrimSpace(route.Action))}
 		var err error
 		switch rule.action {
 		case "dns":
-			rule.domains, err = compileDomains(route.Match)
+			rule.domains, err = compileDomains(route.Match, engine.geoData)
 			if err == nil {
 				if route.ActionValue == nil || strings.TrimSpace(*route.ActionValue) == "" {
 					err = errors.New("DNS server is empty")
@@ -83,12 +91,12 @@ func newRouteEngine(routes []panel.Route) (*routeEngine, error) {
 				}
 			}
 		case "block", "route":
-			rule.domains, err = compileDomains(route.Match)
+			rule.domains, err = compileDomains(route.Match, engine.geoData)
 			if err == nil {
 				rule.decision, err = routeActionDecision(rule.action, route.ActionValue)
 			}
 		case "block_ip", "route_ip":
-			rule.ipprefix, err = compileIPPrefixes(route.Match)
+			rule.ipprefix, err = compileIPPrefixes(route.Match, engine.geoData)
 			if err == nil {
 				rule.decision, err = routeActionDecision(rule.action, route.ActionValue)
 			}
@@ -303,7 +311,7 @@ func (m domainMatcher) matches(host string) bool {
 	}
 }
 
-func compileDomains(values []string) ([]domainMatcher, error) {
+func compileDomains(values []string, geoData *geoDataStore) ([]domainMatcher, error) {
 	result := make([]domainMatcher, 0, len(values))
 	for _, raw := range values {
 		value := strings.TrimSpace(raw)
@@ -313,7 +321,15 @@ func compileDomains(values []string) ([]domainMatcher, error) {
 		lower := strings.ToLower(value)
 		switch {
 		case strings.HasPrefix(lower, "geosite:"):
-			return nil, fmt.Errorf("geosite rules are not available without an external geosite database: %s", value)
+			if geoData == nil {
+				return nil, fmt.Errorf("GeoSite data store is not configured")
+			}
+			code := value[len("geosite:"):]
+			loaded, loadErr := geoData.loadSite(code)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			result = append(result, loaded...)
 		case strings.HasPrefix(lower, "domain:"):
 			result = append(result, domainMatcher{kind: "domain", value: strings.TrimSuffix(strings.TrimPrefix(lower, "domain:"), ".")})
 		case strings.HasPrefix(lower, "full:"):
@@ -335,15 +351,29 @@ func compileDomains(values []string) ([]domainMatcher, error) {
 	return result, nil
 }
 
-func compileIPPrefixes(values []string) ([]*net.IPNet, error) {
+func compileIPPrefixes(values []string, geoData *geoDataStore) ([]*net.IPNet, error) {
 	result := make([]*net.IPNet, 0, len(values))
 	for _, raw := range values {
 		value := strings.TrimSpace(raw)
 		if value == "" {
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(value), "geoip:") {
-			return nil, fmt.Errorf("geoip rules are not available without an external geoip database: %s", value)
+		lower := strings.ToLower(value)
+		if lower == "geoip:private" {
+			result = append(result, privateIPPrefixes()...)
+			continue
+		}
+		if strings.HasPrefix(lower, "geoip:") {
+			if geoData == nil {
+				return nil, fmt.Errorf("GeoIP data store is not configured")
+			}
+			code := value[len("geoip:"):]
+			loaded, loadErr := geoData.loadIP(code)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			result = append(result, loaded...)
+			continue
 		}
 		if ip := net.ParseIP(value); ip != nil {
 			bits := 128
@@ -361,6 +391,41 @@ func compileIPPrefixes(values []string) ([]*net.IPNet, error) {
 		result = append(result, prefix)
 	}
 	return result, nil
+}
+
+// privateIPPrefixes is the built-in equivalent of the commonly used
+// geoip:private rule. It deliberately contains only non-public and reserved
+// ranges, so no external GeoIP database is required for this rule.
+func privateIPPrefixes() []*net.IPNet {
+	ranges := []string{
+		"0.0.0.0/8",
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"172.16.0.0/12",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"192.168.0.0/16",
+		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"224.0.0.0/4",
+		"::/128",
+		"::1/128",
+		"fc00::/7",
+		"fe80::/10",
+		"ff00::/8",
+	}
+	prefixes := make([]*net.IPNet, 0, len(ranges))
+	for _, value := range ranges {
+		_, prefix, err := net.ParseCIDR(value)
+		if err != nil {
+			panic(fmt.Sprintf("invalid built-in private IP range %q: %v", value, err))
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
 }
 
 func compilePorts(values []string) ([]portRange, error) {

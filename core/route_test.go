@@ -80,6 +80,33 @@ func TestRouteEngineRejectsUnsupportedXrayOnlyRules(t *testing.T) {
 	}
 }
 
+func TestRouteEngineSupportsPrivateGeoIPRule(t *testing.T) {
+	engine, err := newRouteEngine([]panel.Route{{
+		Id: 1, Action: "block_ip", Match: []string{"geoip:private"},
+	}})
+	if err != nil {
+		t.Fatalf("geoip:private should be built in: %v", err)
+	}
+	for _, ip := range []string{
+		"10.1.2.3",
+		"100.64.1.2",
+		"127.0.0.1",
+		"172.16.1.2",
+		"192.168.1.2",
+		"169.254.1.2",
+		"::1",
+		"fd00::1",
+		"fe80::1",
+	} {
+		if got := engine.decision(routeTarget{ip: net.ParseIP(ip), port: 443}); got != routeBlock {
+			t.Fatalf("private IP %s decision = %v, want block", ip, got)
+		}
+	}
+	if got := engine.decision(routeTarget{ip: net.ParseIP("8.8.8.8"), port: 443}); got != routeDirect {
+		t.Fatalf("public IP decision = %v, want direct", got)
+	}
+}
+
 func TestRouteEngineBlocksTCPDialBeforeConnecting(t *testing.T) {
 	engine, err := newRouteEngine([]panel.Route{{Id: 1, Action: "block_port", Match: []string{"443"}}})
 	if err != nil {

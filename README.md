@@ -7,12 +7,15 @@ daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的
 ## 功能
 
 - Mieru TCP、UDP 和混合端口绑定
+- 官方 SOCKS5 代理请求，支持 TCP CONNECT 和 UDP ASSOCIATE
+- IPv4、IPv6、多用户和动态用户同步
 - 单端口、多端口和连续端口范围
 - 官方 MTU、Multiplexing、Handshake Mode
 - 客户端与服务端独立 Traffic Pattern
 - Mieru User Hint 强制校验
 - 用户动态增删、限速、在线状态和流量上报
 - DaoBoard 路由组、DNS 规则、域名/IP/端口/协议阻断
+- 兼容 v2node 的 `geoip.dat`、`geosite.dat` 路由数据格式
 - 配置热更新和安全退出
 - Linux TCP BBR 与 UDP socket 缓冲优化
 - Linux amd64、arm64、s390x 构建
@@ -51,6 +54,8 @@ bash install.sh
 ```text
 /usr/local/daonode/daonode
 /etc/daonode/config.json
+/etc/daonode/geoip.dat
+/etc/daonode/geosite.dat
 /etc/systemd/system/daonode.service
 /etc/sysctl.d/99-daonode-network.conf
 ```
@@ -210,6 +215,10 @@ top -H -p "$(pidof daonode)"
 # 查看最近日志
 journalctl -u daonode -n 100 --no-pager
 ```
+
+GeoIP/GeoSite 数据文件由发布包和安装脚本自动安装到 `/etc/daonode`。`geoip:private` 即使没有数据文件也有内置私网规则；其他 `geoip:<code>` 和 `geosite:<code>` 规则需要对应数据文件。
+
+HTTP/HTTPS 是 Mieru 客户端提供的本地代理接口，服务端接收的是 Mieru 官方加密后的 SOCKS5 请求，不需要在 daonode 上额外监听 HTTP/HTTPS 端口。XChaCha20-Poly1305、随机填充、Traffic Pattern 和重放检测均由 Mieru 官方 Server API 执行。
 
 排查顺序：
 

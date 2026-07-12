@@ -329,6 +329,12 @@ install_daonode() {
     rm daonode-linux.zip -f
     chmod +x daonode
     mkdir /etc/daonode/ -p
+    # Route groups use the same GeoIP/GeoSite dat format as v2node.
+    for data in geoip.dat geosite.dat; do
+        if [[ -f "$data" ]]; then
+            install -m 0644 "$data" "/etc/daonode/$data"
+        fi
+    done
     if [[ x"${release}" == x"alpine" ]]; then
         rm /etc/init.d/daonode -f
         cat <<EOF > /etc/init.d/daonode

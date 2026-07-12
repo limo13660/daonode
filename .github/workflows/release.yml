@@ -160,6 +160,9 @@ jobs:
           cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
           cp ${GITHUB_WORKSPACE}/LICENSE-GPL-3.0 ./build_assets/LICENSE-GPL-3.0
           cp ${GITHUB_WORKSPACE}/THIRD_PARTY_NOTICES.md ./build_assets/THIRD_PARTY_NOTICES.md
+          for data in geoip geosite; do
+            curl -fL --retry 3 "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/${data}.dat" -o "./build_assets/${data}.dat"
+          done
       - name: Create ZIP archive
         shell: bash
         run: |
