@@ -5,31 +5,11 @@ permissions:
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - "README.md"
-      - "LICENSE*"
-      - "THIRD_PARTY_NOTICES.md"
-      - ".github/build/friendly-filenames.json"
-      - ".github/workflows/release.yml"
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-      - "README.md"
-      - "LICENSE*"
-      - "THIRD_PARTY_NOTICES.md"
-      - ".github/build/friendly-filenames.json"
-      - ".github/workflows/release.yml"
-  release:
-    types: [published]
+    inputs:
+      release_tag:
+        description: "Release tag，例如 v0.1.0；留空时只生成 Actions Artifacts"
+        required: false
+        type: string
 
 jobs:
 
@@ -38,6 +18,13 @@ jobs:
     env:
       GOEXPERIMENT: jsonv2
     steps:
+      - name: Validate release tag
+        if: ${{ inputs.release_tag != '' }}
+        run: |
+          if [[ ! "${{ inputs.release_tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release_tag must look like v0.1.0" >&2
+            exit 1
+          fi
       - name: Checkout codebase
         uses: actions/checkout@v5
       - name: Set up Go
@@ -144,14 +131,13 @@ jobs:
       - name: Get project dependencies
         run: |
           go mod download
-      - name: Get release version
-        if: ${{ github.event_name == 'release' }}
+      - name: Resolve build version
         run: |
-          echo "version=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
-      - name: Get other version
-        if: ${{ github.event_name != 'release' }}
-        run: |
-          echo "version=${{ github.sha }}" >> $GITHUB_ENV
+          if [[ -n "${{ inputs.release_tag }}" ]]; then
+            echo "version=${{ inputs.release_tag }}" >> $GITHUB_ENV
+          else
+            echo "version=${{ github.sha }}" >> $GITHUB_ENV
+          fi
       - name: Build daonode
         run: |
           echo "version: $version"
@@ -196,11 +182,24 @@ jobs:
           name: daonode-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: |
             ./daonode-${{ steps.get_filename.outputs.ASSET_NAME }}/*
+            ./daonode-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
+
+  publish:
+    if: ${{ inputs.release_tag != '' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          pattern: daonode-*
+          merge-multiple: true
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./daonode-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
-          tag: ${{ github.ref }}
+          file: release-assets/*.zip*
+          tag: ${{ inputs.release_tag }}
           file_glob: true
+          overwrite: true
