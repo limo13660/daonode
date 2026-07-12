@@ -213,18 +213,24 @@ EOF
 
     # Mieru officially recommends BBR for TCP. Its UDP transport already
     # implements BBR inside the protocol and does not use this kernel setting.
+    # Write BBR as the default and keep the module loaded across reboots.
+    mkdir -p /etc/modules-load.d
+    printf '%s\n' tcp_bbr > /etc/modules-load.d/daonode-bbr.conf
     if command -v modprobe >/dev/null 2>&1; then
         modprobe tcp_bbr >/dev/null 2>&1 || true
     fi
-    if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
-        cat >> /etc/sysctl.d/99-daonode-network.conf <<EOF
+    cat >> /etc/sysctl.d/99-daonode-network.conf <<EOF
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
-    fi
 
     rm -f /etc/sysctl.d/99-daonode-udp.conf
-    sysctl -p /etc/sysctl.d/99-daonode-network.conf >/dev/null 2>&1 || true
+    if ! sysctl -p /etc/sysctl.d/99-daonode-network.conf >/dev/null 2>&1; then
+        echo -e "${yellow}当前内核可能不支持 BBR，请升级内核后检查 net.ipv4.tcp_available_congestion_control${plain}"
+    fi
+    if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" != "bbr" ]]; then
+        echo -e "${yellow}TCP BBR 未能立即启用；daonode 已保留默认配置，重启或升级内核后会再次尝试${plain}"
+    fi
 }
 
 # 0: running, 1: not running, 2: not installed

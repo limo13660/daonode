@@ -116,6 +116,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	if err := json.Unmarshal(response.Body(), common); err != nil {
 		return nil, fmt.Errorf("decode node params: %w", err)
 	}
+	common.Protocol = strings.ToLower(strings.TrimSpace(common.Protocol))
 	if common.Protocol != "mieru" {
 		return nil, fmt.Errorf("unsupported protocol: %s", common.Protocol)
 	}
@@ -169,11 +170,11 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 
 	return &NodeInfo{
 		Id:           c.NodeId,
-		Type:         "mieru",
+		Type:         common.Protocol,
 		Security:     common.Tls,
 		PushInterval: pushInterval,
 		PullInterval: pullInterval,
-		Tag:          fmt.Sprintf("[%s]-mieru:%d", c.APIHost, c.NodeId),
+		Tag:          fmt.Sprintf("[%s]-%s:%d", c.APIHost, common.Protocol, c.NodeId),
 		Common:       common,
 	}, nil
 }

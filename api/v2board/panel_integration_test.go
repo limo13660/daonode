@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 			}
 			w.Header().Set("ETag", `"config-etag"`)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"protocol": "mieru", "server_port": 32000,
+				"protocol": " MIERU ", "server_port": 32000,
 				"transport_protocol": "TCP", "mtu": 1400,
 				"port_bindings":   []map[string]any{{"port": "32001", "server_port": "32001", "protocol": "UDP"}},
 				"traffic_pattern": "", "user_hint_is_mandatory": true,
@@ -68,6 +69,9 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 	if err != nil || node == nil || node.Type != "mieru" || node.Common.ServerPort != 32000 {
 		t.Fatalf("GetNodeInfo() = %+v, %v", node, err)
 	}
+	if node.Common.Protocol != "mieru" || !strings.Contains(node.Tag, "-mieru:9") {
+		t.Fatalf("GetNodeInfo() protocol routing = %+v", node)
+	}
 	if len(node.Common.Routes) != 1 || node.Common.Routes[0].Action != "block_ip" {
 		t.Fatalf("GetNodeInfo() routes = %+v", node.Common.Routes)
 	}
@@ -95,5 +99,25 @@ func TestDaoBoardPanelFlow(t *testing.T) {
 	online := map[int][]string{12: {"127.0.0.1"}}
 	if err := client.ReportNodeOnlineUsers(ctx, &online); err != nil {
 		t.Fatalf("ReportNodeOnlineUsers() error = %v", err)
+	}
+}
+
+func TestDaoBoardRejectsUnsupportedProtocol(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"protocol": "future", "server_port": 32000,
+		})
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{
+		APIHost: server.URL, NodeID: 9, Key: "secret", Timeout: 5, RetryCount: &retryCount,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetNodeInfo(context.Background()); err == nil || !strings.Contains(err.Error(), "unsupported protocol: future") {
+		t.Fatalf("GetNodeInfo() error = %v", err)
 	}
 }
