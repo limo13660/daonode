@@ -186,6 +186,14 @@ journalctl -u daonode -n 100 --no-pager
 
 `port` 是客户端连接端口，`server_port` 是 daonode 监听端口。没有 NAT 映射时两者应保持一致。
 
+监听地址由面板的 `listen_ip` 控制：
+
+- `0.0.0.0`：只明确监听 IPv4。
+- `::`：监听 IPv6；当 Linux `net.ipv6.bindv6only=0` 时同时接受 IPv4。
+- 指定 IPv4/IPv6：只监听该网卡地址。
+
+IPv6 节点建议填写 `::`，并确认防火墙、云安全组和 Docker/宿主机网络已经放行对应 TCP 或 UDP 端口。若需要一个 IPv6 socket 同时接收 IPv4，检查 `sysctl net.ipv6.bindv6only` 的结果为 `0`。
+
 附加绑定是“主端口之外的绑定列表”，不是替代主端口。每个对象的 `port` 与 `protocol` 在客户端配置中按相同位置配对；使用端口范围时，客户端和服务端范围长度必须相同。没有额外端口时直接保留默认值 `[]` 即可。
 
 ## User Hint

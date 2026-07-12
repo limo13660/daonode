@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ type NodeInfo struct {
 
 type CommonNode struct {
 	Protocol            string        `json:"protocol"`
+	ListenIP            string        `json:"listen_ip"`
 	ServerPort          int           `json:"server_port"`
 	TransportProtocol   string        `json:"transport_protocol"`
 	PortBindings        []PortBinding `json:"port_bindings"`
@@ -122,6 +124,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	}
 	if common.ServerPort < 1 || common.ServerPort > 65535 {
 		return nil, fmt.Errorf("invalid Mieru server port: %d", common.ServerPort)
+	}
+	common.ListenIP = strings.TrimSpace(common.ListenIP)
+	if common.ListenIP == "" {
+		common.ListenIP = "0.0.0.0"
+	}
+	if net.ParseIP(common.ListenIP) == nil {
+		return nil, fmt.Errorf("invalid Mieru listen IP: %s", common.ListenIP)
 	}
 	if common.TransportProtocol == "" {
 		common.TransportProtocol = "TCP"

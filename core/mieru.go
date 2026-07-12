@@ -44,17 +44,34 @@ const (
 	maxSocks5UDPPayloadSize = 1 << 16
 )
 
-type bufferedPacketListener struct {
+type mieruListenerFactory struct {
+	listenIP     string
 	listenConfig net.ListenConfig
 }
 
-func newBufferedPacketListener() *bufferedPacketListener {
-	return &bufferedPacketListener{
+func newMieruListenerFactory(listenIP string) *mieruListenerFactory {
+	if strings.TrimSpace(listenIP) == "" {
+		listenIP = "0.0.0.0"
+	}
+	return &mieruListenerFactory{
+		listenIP:     listenIP,
 		listenConfig: net.ListenConfig{Control: sockopts.DefaultListenerControl()},
 	}
 }
 
-func (l *bufferedPacketListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+func (l *mieruListenerFactory) Listen(ctx context.Context, network, address string) (net.Listener, error) {
+	address, err := l.rewriteAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	return l.listenConfig.Listen(ctx, network, address)
+}
+
+func (l *mieruListenerFactory) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	address, err := l.rewriteAddress(address)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := l.listenConfig.ListenPacket(ctx, network, address)
 	if err != nil {
 		return nil, err
@@ -64,6 +81,14 @@ func (l *bufferedPacketListener) ListenPacket(ctx context.Context, network, addr
 		_ = udpConn.SetWriteBuffer(udpSocketBufferSize)
 	}
 	return conn, nil
+}
+
+func (l *mieruListenerFactory) rewriteAddress(address string) (string, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("parse Mieru listener address %q: %w", address, err)
+	}
+	return net.JoinHostPort(l.listenIP, port), nil
 }
 
 type mieruRuntime struct {
@@ -182,8 +207,10 @@ func (m *mieruRuntime) restartLocked() error {
 	config.TrafficPattern = trafficPattern
 	server := mieruserver.NewServer()
 	serverConfig := &mieruserver.ServerConfig{Config: config}
+	listenerFactory := newMieruListenerFactory(m.info.Common.ListenIP)
+	serverConfig.StreamListenerFactory = listenerFactory
 	if mieruHasUDPBinding(portBindings) {
-		serverConfig.PacketListenerFactory = newBufferedPacketListener()
+		serverConfig.PacketListenerFactory = listenerFactory
 	}
 	if err := server.Store(serverConfig); err != nil {
 		return fmt.Errorf("store mieru config: %w", err)
@@ -203,6 +230,7 @@ func (m *mieruRuntime) restartLocked() error {
 	log.WithFields(log.Fields{
 		"tag":       m.tag,
 		"port":      m.info.Common.ServerPort,
+		"listen_ip": m.info.Common.ListenIP,
 		"transport": strings.ToUpper(m.info.Common.TransportProtocol),
 		"bindings":  len(portBindings),
 		"users":     len(m.users),
