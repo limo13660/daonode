@@ -36,6 +36,12 @@ type trafficTotal struct {
 	download int64
 }
 
+// ErrRuntimeStopTimeout means the Mieru lifecycle is no longer safe to
+// recover in-process. The service supervisor should replace the process.
+var ErrRuntimeStopTimeout = errors.New("mieru runtime stop timed out")
+
+var mieruStopTimeout = 5 * time.Second
+
 var committedTraffic sync.Map // node tag + user ID -> trafficTotal
 
 const (
@@ -121,9 +127,18 @@ func (m *mieruRuntime) Start() error {
 }
 
 func (m *mieruRuntime) Stop() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.stopLocked(true)
+	done := make(chan error, 1)
+	go func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		done <- m.stopLocked(true)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(mieruStopTimeout):
+		return fmt.Errorf("%w while acquiring the runtime lock", ErrRuntimeStopTimeout)
+	}
 }
 
 func (m *mieruRuntime) AddUsers(users []panel.UserInfo) (int, error) {
@@ -135,6 +150,9 @@ func (m *mieruRuntime) AddUsers(users []panel.UserInfo) (int, error) {
 	}
 	if err := m.restartLocked(); err != nil {
 		m.users = previous
+		if errors.Is(err, ErrRuntimeStopTimeout) {
+			return 0, err
+		}
 		if recoverErr := m.restartLocked(); recoverErr != nil {
 			return 0, fmt.Errorf("apply users: %v; restore previous users: %w", err, recoverErr)
 		}
@@ -156,6 +174,9 @@ func (m *mieruRuntime) DelUsers(users []panel.UserInfo) error {
 	if err := m.restartLocked(); err != nil {
 		m.users = previous
 		m.pending = previousPending
+		if errors.Is(err, ErrRuntimeStopTimeout) {
+			return err
+		}
 		if recoverErr := m.restartLocked(); recoverErr != nil {
 			return fmt.Errorf("delete users: %v; restore previous users: %w", err, recoverErr)
 		}
@@ -250,10 +271,19 @@ func (m *mieruRuntime) stopLocked(closeConnections bool) error {
 	if m.stopCh != nil {
 		close(m.stopCh)
 	}
-	err := m.server.Stop()
+	server := m.server
 	m.server = nil
 	m.stopCh = nil
-	return err
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Stop()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(mieruStopTimeout):
+		return fmt.Errorf("%w after %s", ErrRuntimeStopTimeout, mieruStopTimeout)
+	}
 }
 
 func (m *mieruRuntime) acceptLoop(server mieruserver.Server, stopCh <-chan struct{}) {

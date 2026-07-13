@@ -382,7 +382,9 @@ LimitNOFILE=999999
 WorkingDirectory=/usr/local/daonode/
 ExecStart=/usr/local/daonode/daonode server
 Restart=always
-RestartSec=10
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

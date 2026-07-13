@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/common/task"
@@ -93,15 +94,22 @@ func (c *Controller) Start(x *core.V2Core) error {
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	if c.nodeInfoMonitorPeriodic != nil {
-		c.nodeInfoMonitorPeriodic.Close()
+	var tasks sync.WaitGroup
+	for _, periodic := range []*task.Task{
+		c.nodeInfoMonitorPeriodic,
+		c.userReportPeriodic,
+		c.renewCertPeriodic,
+	} {
+		if periodic == nil {
+			continue
+		}
+		tasks.Add(1)
+		go func(current *task.Task) {
+			defer tasks.Done()
+			current.Close()
+		}(periodic)
 	}
-	if c.userReportPeriodic != nil {
-		c.userReportPeriodic.Close()
-	}
-	if c.renewCertPeriodic != nil {
-		c.renewCertPeriodic.Close()
-	}
+	tasks.Wait()
 	var err error
 	if c.active && c.server != nil && c.tag != "" {
 		err = c.server.DelNode(c.tag)

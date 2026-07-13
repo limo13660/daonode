@@ -101,6 +101,9 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 					"tag": c.tag,
 					"err": err,
 				}).Error("Delete users failed")
+				if errors.Is(err, vCore.ErrRuntimeStopTimeout) {
+					c.requestRuntimeReload()
+				}
 				return nil
 			}
 		}
@@ -116,6 +119,9 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 					"tag": c.tag,
 					"err": err,
 				}).Error("Add users failed")
+				if errors.Is(err, vCore.ErrRuntimeStopTimeout) {
+					c.requestRuntimeReload()
+				}
 				return nil
 			}
 		}
@@ -141,4 +147,15 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 		c.limiter.SetAliveList(newA)
 	}
 	return nil
+}
+
+func (c *Controller) requestRuntimeReload() {
+	if c.server.ReloadCh == nil {
+		log.WithField("tag", c.tag).Error("Runtime reload channel is unavailable")
+		return
+	}
+	select {
+	case c.server.ReloadCh <- struct{}{}:
+	default:
+	}
 }

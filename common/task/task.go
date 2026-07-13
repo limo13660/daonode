@@ -109,8 +109,8 @@ func (t *Task) safeStop() {
 	if doneCh != nil {
 		select {
 		case <-doneCh:
-		case <-time.After(10 * time.Second):
-			log.Warnf("Task %s did not stop within 10 seconds", t.Name)
+		case <-time.After(5 * time.Second):
+			log.Warnf("Task %s did not stop within 5 seconds", t.Name)
 		}
 	}
 }
