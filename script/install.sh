@@ -335,6 +335,21 @@ install_daonode() {
     rm daonode-linux.zip -f
     chmod +x daonode
     mkdir /etc/daonode/ -p
+    cat <<'EOF' > /usr/local/daonode/count-start.sh
+#!/bin/sh
+
+count_file="/etc/daonode/run_count"
+count=0
+if [ -f "$count_file" ]; then
+    count=$(cat "$count_file" 2>/dev/null)
+fi
+case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+esac
+count=$((count + 1))
+printf '%s\n' "$count" > "$count_file"
+EOF
+    chmod +x /usr/local/daonode/count-start.sh
     # Route groups use the same GeoIP/GeoSite dat format as v2node.
     for data in geoip.dat geosite.dat; do
         if [[ -f "$data" ]]; then
@@ -355,6 +370,10 @@ command_user="root"
 
 pidfile="/run/daonode.pid"
 command_background="yes"
+
+start_pre() {
+        /usr/local/daonode/count-start.sh
+}
 
 depend() {
         need net
@@ -380,6 +399,7 @@ LimitRSS=infinity
 LimitCORE=infinity
 LimitNOFILE=999999
 WorkingDirectory=/usr/local/daonode/
+ExecStartPre=/usr/local/daonode/count-start.sh
 ExecStart=/usr/local/daonode/daonode server
 Restart=always
 RestartSec=2
@@ -445,8 +465,6 @@ EOF
     echo "daonode uninstall    - 卸载 daonode"
     echo "daonode version      - 查看 daonode 版本"
     echo "------------------------------------------"
-    curl -fsS --max-time 10 "https://api.v-50.me/counter" || true
-
     if [[ $first_install == true ]]; then
         read -rp "检测到你为第一次安装 daonode，是否自动生成 /etc/daonode/config.json？(y/n): " if_generate
         if [[ "$if_generate" =~ ^[Yy]$ ]]; then

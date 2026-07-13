@@ -389,14 +389,70 @@ show_status() {
         0)
             echo -e "daonode状态: ${green}已运行${plain}"
             show_enable_status
+            show_backend_info
             ;;
         1)
             echo -e "daonode状态: ${yellow}未运行${plain}"
             show_enable_status
+            show_backend_info
             ;;
         2)
             echo -e "daonode状态: ${red}未安装${plain}"
     esac
+}
+
+get_backend_version() {
+    local binary="/usr/local/daonode/daonode"
+    local backend_version
+    if [[ ! -x "$binary" ]]; then
+        echo "未安装"
+        return
+    fi
+    backend_version=$("$binary" version 2>/dev/null | awk 'NR == 1 {print $2}')
+    if [[ -z "$backend_version" ]]; then
+        backend_version="未知"
+    fi
+    echo "$backend_version"
+}
+
+get_backend_run_count() {
+    local count_file="/etc/daonode/run_count"
+    local count
+    if [[ -f "$count_file" ]]; then
+        count=$(cat "$count_file" 2>/dev/null)
+        if [[ "$count" =~ ^[0-9]+$ ]]; then
+            echo "$count"
+            return
+        fi
+    fi
+
+    # Compatibility fallback for installations created before the persistent
+    # backend counter was introduced.
+    if [[ x"${release}" != x"alpine" ]] && command -v systemctl >/dev/null 2>&1; then
+        count=$(systemctl show daonode -p NRestarts --value 2>/dev/null)
+        [[ "$count" =~ ^[0-9]+$ ]] || count=0
+        if systemctl is-active --quiet daonode 2>/dev/null; then
+            count=$((count + 1))
+        fi
+        echo "$count"
+        return
+    fi
+
+    check_status
+    if [[ $? == 0 ]]; then
+        echo "1"
+    else
+        echo "0"
+    fi
+}
+
+show_backend_info() {
+    local backend_version
+    local backend_run_count
+    backend_version=$(get_backend_version)
+    backend_run_count=$(get_backend_run_count)
+    echo -e "当前后端版本: ${green}${backend_version}${plain}"
+    echo -e "当前后端累计运行次数: ${green}${backend_run_count}${plain}"
 }
 
 show_enable_status() {
@@ -409,8 +465,7 @@ show_enable_status() {
 }
 
 show_daonode_version() {
-    echo -n "daonode 版本："
-    /usr/local/daonode/daonode version
+    echo -e "当前后端版本: ${green}$(get_backend_version)${plain}"
     echo ""
     if [[ $# == 0 ]]; then
         before_show_menu
