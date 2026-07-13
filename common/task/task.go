@@ -15,8 +15,9 @@ type Task struct {
 	Execute  func(context.Context) error
 	Access   sync.RWMutex
 	Running  bool
-	ReloadCh chan struct{}
 	Stop     chan struct{}
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 func (t *Task) Start(first bool) error {
@@ -27,13 +28,28 @@ func (t *Task) Start(first bool) error {
 	}
 	t.Running = true
 	t.Stop = make(chan struct{})
+	runCtx, cancel := context.WithCancel(context.Background())
+	t.cancel = cancel
+	t.done = make(chan struct{})
+	stopCh := t.Stop
+	doneCh := t.done
 	t.Access.Unlock()
 	go func() {
+		defer close(doneCh)
+		defer func() {
+			t.Access.Lock()
+			if t.Stop == stopCh {
+				t.Running = false
+				t.cancel = nil
+				t.done = nil
+			}
+			t.Access.Unlock()
+		}()
 		timer := time.NewTimer(t.Interval)
 		defer timer.Stop()
 		if first {
-			if err := t.ExecuteWithTimeout(); err != nil {
-				return
+			if err := t.executeWithTimeout(runCtx); err != nil {
+				log.Errorf("Task %s execution error: %v", t.Name, err)
 			}
 		}
 
@@ -42,13 +58,14 @@ func (t *Task) Start(first bool) error {
 			select {
 			case <-timer.C:
 				// continue
-			case <-t.Stop:
+			case <-stopCh:
+				return
+			case <-runCtx.Done():
 				return
 			}
 
-			if err := t.ExecuteWithTimeout(); err != nil {
+			if err := t.executeWithTimeout(runCtx); err != nil {
 				log.Errorf("Task %s execution error: %v", t.Name, err)
-				return
 			}
 		}
 	}()
@@ -57,44 +74,48 @@ func (t *Task) Start(first bool) error {
 }
 
 func (t *Task) ExecuteWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
+	return t.executeWithTimeout(context.Background())
+}
+
+func (t *Task) executeWithTimeout(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, min(5*t.Interval, 5*time.Minute))
 	defer cancel()
-	done := make(chan error, 1)
-
-	go func() {
-		done <- t.Execute(ctx)
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Errorf("Task %s execution timed out, reloading", t.Name)
-		if t.ReloadCh != nil {
-			select {
-			case t.ReloadCh <- struct{}{}:
-			default:
-			}
-		} else {
-			log.Panic("Reload failed")
-		}
+	err := t.Execute(ctx)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		log.Warnf("Task %s execution timed out; keeping the current node runtime and retrying later", t.Name)
 		return nil
-	case err := <-done:
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil
-		}
-		return err
 	}
+	if errors.Is(parent.Err(), context.Canceled) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return err
 }
 
 func (t *Task) safeStop() {
 	t.Access.Lock()
-	if t.Running {
-		t.Running = false
-		close(t.Stop)
+	if !t.Running {
+		t.Access.Unlock()
+		return
+	}
+	t.Running = false
+	stopCh := t.Stop
+	cancel := t.cancel
+	doneCh := t.done
+	close(stopCh)
+	if cancel != nil {
+		cancel()
 	}
 	t.Access.Unlock()
+	if doneCh != nil {
+		select {
+		case <-doneCh:
+		case <-time.After(10 * time.Second):
+			log.Warnf("Task %s did not stop within 10 seconds", t.Name)
+		}
+	}
 }
 
 func (t *Task) Close() {
 	t.safeStop()
-	log.Warningf("Task %s stopped", t.Name)
+	log.Infof("Task %s stopped", t.Name)
 }

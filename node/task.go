@@ -17,14 +17,12 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Name:     "nodeInfoMonitor",
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
-		ReloadCh: c.server.ReloadCh,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
 		Name:     "reportUserTrafficTask",
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
-		ReloadCh: c.server.ReloadCh,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
 	// delay to start nodeInfoMonitor
@@ -39,7 +37,6 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 				Name:     "renewCertTask",
 				Interval: 24 * time.Hour,
 				Execute:  c.renewCertTask,
-				ReloadCh: c.server.ReloadCh,
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
 			_ = c.renewCertPeriodic.Start(true)
@@ -63,7 +60,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if newN != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
-		}).Error("Got new node info, reload")
+		}).Info("Node configuration changed, requesting runtime reload")
 		if c.server.ReloadCh != nil {
 			select {
 			case c.server.ReloadCh <- struct{}{}:
@@ -72,6 +69,9 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		} else {
 			log.Panic("Reload failed")
 		}
+		// The current controller is about to be replaced. Do not continue with
+		// user/alive synchronization against a runtime that is being shut down.
+		return nil
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 	return c.syncUsers(ctx)
