@@ -45,10 +45,51 @@ var mieruStopTimeout = 5 * time.Second
 var committedTraffic sync.Map // node tag + user ID -> trafficTotal
 
 const (
-	udpSocketBufferSize     = 16 << 20
-	maxSocks5UDPHeaderSize  = 3 + 1 + 1 + 255 + 2
-	maxSocks5UDPPayloadSize = 1 << 16
+	udpListenerSocketBufferSize    = 4 << 20
+	udpAssociationSocketBufferSize = 512 << 10
+	udpAssociationIdleTimeout      = 5 * time.Minute
+	udpAddressCacheMaxEntries      = 256
+	maxMieruCredentialTombstones   = 1024
+	maxSocks5UDPHeaderSize         = 3 + 1 + 1 + 255 + 2
+	maxSocks5UDPPayloadSize        = 1 << 16
 )
+
+var mieruUDPBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, maxSocks5UDPHeaderSize+maxSocks5UDPPayloadSize)
+	},
+}
+
+type udpHeaderCache struct {
+	mu      sync.RWMutex
+	entries map[netip.AddrPort][]byte
+}
+
+func newUDPHeaderCache() *udpHeaderCache {
+	return &udpHeaderCache{entries: make(map[netip.AddrPort][]byte)}
+}
+
+func (c *udpHeaderCache) Load(addr netip.AddrPort) ([]byte, bool) {
+	c.mu.RLock()
+	header, ok := c.entries[addr]
+	c.mu.RUnlock()
+	return header, ok
+}
+
+func (c *udpHeaderCache) Store(addr netip.AddrPort, header []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.entries[addr]; ok && bytes.Equal(existing, header) {
+		return
+	}
+	if _, exists := c.entries[addr]; !exists && len(c.entries) >= udpAddressCacheMaxEntries {
+		for cachedAddr := range c.entries {
+			delete(c.entries, cachedAddr)
+			break
+		}
+	}
+	c.entries[addr] = append([]byte(nil), header...)
+}
 
 type mieruListenerFactory struct {
 	listenIP     string
@@ -83,8 +124,8 @@ func (l *mieruListenerFactory) ListenPacket(ctx context.Context, network, addres
 		return nil, err
 	}
 	if udpConn, ok := conn.(*net.UDPConn); ok {
-		_ = udpConn.SetReadBuffer(udpSocketBufferSize)
-		_ = udpConn.SetWriteBuffer(udpSocketBufferSize)
+		_ = udpConn.SetReadBuffer(udpListenerSocketBufferSize)
+		_ = udpConn.SetWriteBuffer(udpListenerSocketBufferSize)
 	}
 	return conn, nil
 }
@@ -101,22 +142,34 @@ type mieruRuntime struct {
 	tag  string
 	info *panel.NodeInfo
 
-	mu      sync.RWMutex
-	server  mieruserver.Server
-	stopCh  chan struct{}
-	router  *routeEngine
-	users   map[int]panel.UserInfo
-	pending map[int]trafficTotal
-	conns   map[int]map[net.Conn]struct{}
+	mu           sync.RWMutex
+	server       mieruserver.Server
+	stopCh       chan struct{}
+	router       *routeEngine
+	users        map[int]panel.UserInfo
+	pending      map[int]trafficTotal
+	conns        map[int]map[net.Conn]struct{}
+	trafficUsers map[int]struct{}
+	// credentials includes active users plus a bounded set of deleted-user
+	// tombstones. Application-level lookup still rejects deleted users, while
+	// retaining the password keeps same-credential renewals from destabilizing
+	// shared Mieru transports.
+	credentials map[int]string
+}
+
+type mieruUserUpdater interface {
+	UpdateUsers([]*appctlpb.User) error
 }
 
 func newMieruRuntime(tag string, info *panel.NodeInfo) *mieruRuntime {
 	return &mieruRuntime{
-		tag:     tag,
-		info:    info,
-		users:   make(map[int]panel.UserInfo),
-		pending: make(map[int]trafficTotal),
-		conns:   make(map[int]map[net.Conn]struct{}),
+		tag:          tag,
+		info:         info,
+		users:        make(map[int]panel.UserInfo),
+		pending:      make(map[int]trafficTotal),
+		conns:        make(map[int]map[net.Conn]struct{}),
+		trafficUsers: make(map[int]struct{}),
+		credentials:  make(map[int]string),
 	}
 }
 
@@ -142,45 +195,85 @@ func (m *mieruRuntime) Stop() error {
 }
 
 func (m *mieruRuntime) AddUsers(users []panel.UserInfo) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	previous := maps.Clone(m.users)
-	for _, user := range users {
-		m.users[user.Id] = user
-	}
-	if err := m.restartLocked(); err != nil {
-		m.users = previous
-		if errors.Is(err, ErrRuntimeStopTimeout) {
-			return 0, err
-		}
-		if recoverErr := m.restartLocked(); recoverErr != nil {
-			return 0, fmt.Errorf("apply users: %v; restore previous users: %w", err, recoverErr)
-		}
+	if err := m.SyncUsers(nil, users); err != nil {
 		return 0, err
 	}
 	return len(users), nil
 }
 
 func (m *mieruRuntime) DelUsers(users []panel.UserInfo) error {
+	return m.SyncUsers(users, nil)
+}
+
+func (m *mieruRuntime) SyncUsers(deleted, added []panel.UserInfo) error {
+	if len(deleted) == 0 && len(added) == 0 {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	previous := maps.Clone(m.users)
-	previousPending := maps.Clone(m.pending)
-	for _, user := range users {
-		m.closeUserConnectionsLocked(user.Id)
+	for _, user := range deleted {
 		delete(m.users, user.Id)
-		delete(m.pending, user.Id)
+	}
+	for _, user := range added {
+		m.users[user.Id] = user
+	}
+	credentialChanged := m.credentialChangedLocked(added)
+	projectedCredentialCount := len(m.credentials)
+	for _, user := range added {
+		if _, exists := m.credentials[user.Id]; !exists {
+			projectedCredentialCount++
+		}
+	}
+	tooManyCredentialTombstones := projectedCredentialCount > len(m.users)+maxMieruCredentialTombstones
+	if m.server != nil && len(previous) > 0 && len(m.users) > 0 && !credentialChanged && !tooManyCredentialTombstones {
+		if updater, ok := m.server.(mieruUserUpdater); ok {
+			previousCredentials := maps.Clone(m.credentials)
+			authenticationChanged := false
+			for _, user := range added {
+				if _, exists := m.credentials[user.Id]; !exists {
+					authenticationChanged = true
+				}
+				m.credentials[user.Id] = user.Uuid
+			}
+			if authenticationChanged {
+				if err := updater.UpdateUsers(m.mieruAuthenticationUsersLocked()); err != nil {
+					m.users = previous
+					m.credentials = previousCredentials
+					return fmt.Errorf("hot-update Mieru users: %w", err)
+				}
+			}
+			for _, user := range deleted {
+				m.closeUserConnectionsLocked(user.Id)
+			}
+			log.WithFields(log.Fields{
+				"tag":            m.tag,
+				"users":          len(m.users),
+				"auth_users":     len(m.credentials),
+				"added":          len(added),
+				"deleted":        len(deleted),
+				"auth_refreshed": authenticationChanged,
+			}).Info("Mieru users updated without restarting the runtime")
+			return nil
+		}
+	}
+	if credentialChanged {
+		log.WithField("tag", m.tag).Info("Mieru credential changed; restarting runtime to revoke old authenticated transports")
+	} else if tooManyCredentialTombstones {
+		log.WithField("tag", m.tag).Info("Mieru deleted-user credential cache reached its limit; restarting runtime to prune it")
 	}
 	if err := m.restartLocked(); err != nil {
 		m.users = previous
-		m.pending = previousPending
 		if errors.Is(err, ErrRuntimeStopTimeout) {
 			return err
 		}
 		if recoverErr := m.restartLocked(); recoverErr != nil {
-			return fmt.Errorf("delete users: %v; restore previous users: %w", err, recoverErr)
+			return fmt.Errorf("synchronize users: %v; restore previous users: %w", err, recoverErr)
 		}
 		return err
+	}
+	for _, user := range deleted {
+		m.closeUserConnectionsLocked(user.Id)
 	}
 	return nil
 }
@@ -195,6 +288,7 @@ func (m *mieruRuntime) restartLocked() error {
 			return err
 		}
 		m.router = router
+		m.credentials = make(map[int]string)
 		return nil
 	}
 
@@ -202,14 +296,7 @@ func (m *mieruRuntime) restartLocked() error {
 	if err != nil {
 		return err
 	}
-	users := make([]*appctlpb.User, 0, len(m.users))
-	for _, user := range m.users {
-		name := m.userName(user.Id)
-		users = append(users, &appctlpb.User{
-			Name:     proto.String(name),
-			Password: proto.String(user.Uuid),
-		})
-	}
+	users := m.mieruServerUsersLocked()
 
 	config := &appctlpb.ServerConfig{
 		PortBindings: portBindings,
@@ -226,7 +313,7 @@ func (m *mieruRuntime) restartLocked() error {
 		return fmt.Errorf("decode Mieru traffic pattern: %w", err)
 	}
 	config.TrafficPattern = trafficPattern
-	server := mieruserver.NewServer()
+	server := newHotMieruServer()
 	serverConfig := &mieruserver.ServerConfig{Config: config}
 	listenerFactory := newMieruListenerFactory(m.info.Common.ListenIP)
 	serverConfig.StreamListenerFactory = listenerFactory
@@ -246,6 +333,10 @@ func (m *mieruRuntime) restartLocked() error {
 
 	m.server = server
 	m.router = router
+	m.credentials = make(map[int]string, len(m.users))
+	for uid, user := range m.users {
+		m.credentials[uid] = user.Uuid
+	}
 	m.stopCh = make(chan struct{})
 	go m.acceptLoop(server, m.stopCh)
 	log.WithFields(log.Fields{
@@ -257,6 +348,37 @@ func (m *mieruRuntime) restartLocked() error {
 		"users":     len(m.users),
 	}).Info("Mieru runtime started")
 	return nil
+}
+
+func (m *mieruRuntime) credentialChangedLocked(added []panel.UserInfo) bool {
+	for _, user := range added {
+		if previous, exists := m.credentials[user.Id]; exists && previous != user.Uuid {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mieruRuntime) mieruAuthenticationUsersLocked() []*appctlpb.User {
+	users := make([]*appctlpb.User, 0, len(m.credentials))
+	for uid, password := range m.credentials {
+		users = append(users, &appctlpb.User{
+			Name:     proto.String(m.userName(uid)),
+			Password: proto.String(password),
+		})
+	}
+	return users
+}
+
+func (m *mieruRuntime) mieruServerUsersLocked() []*appctlpb.User {
+	users := make([]*appctlpb.User, 0, len(m.users))
+	for _, user := range m.users {
+		users = append(users, &appctlpb.User{
+			Name:     proto.String(m.userName(user.Id)),
+			Password: proto.String(user.Uuid),
+		})
+	}
+	return users
 }
 
 func (m *mieruRuntime) stopLocked(closeConnections bool) error {
@@ -294,12 +416,40 @@ func (m *mieruRuntime) acceptLoop(server mieruserver.Server, stopCh <-chan struc
 			case <-stopCh:
 				return
 			default:
-				log.WithFields(log.Fields{"tag": m.tag, "err": err}).Error("Accept Mieru connection failed")
+			}
+			if isExpectedMieruHandshakeError(err) {
+				log.WithFields(log.Fields{"tag": m.tag, "err": err}).Debug("Rejected invalid Mieru connection")
 				continue
 			}
+			log.WithFields(log.Fields{"tag": m.tag, "err": err}).Warn("Accept Mieru connection failed")
+			select {
+			case <-stopCh:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			continue
 		}
 		go m.handleConnection(proxyConn, request)
 	}
+}
+
+func isExpectedMieruHandshakeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"invalid version",
+		"unsupported version",
+		"invalid socks5",
+		"authentication failed",
+		"user not found",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *mieruRuntime) handleConnection(proxyConn net.Conn, request *model.Request) {
@@ -323,10 +473,12 @@ func (m *mieruRuntime) handleConnection(proxyConn net.Conn, request *model.Reque
 		return
 	}
 	ip := remoteIP(proxyConn.RemoteAddr())
-	bucket, reject := nodeLimiter.CheckLimit(format.UserTag(m.tag, user.Uuid), ip, true)
+	userTag := format.UserTag(m.tag, user.Uuid)
+	bucket, reject := nodeLimiter.CheckLimit(userTag, ip, true)
 	if reject {
 		return
 	}
+	defer nodeLimiter.ReleaseConnection(userTag, ip)
 	if bucket != nil {
 		proxyConn = rate.NewConnRateLimiter(proxyConn, bucket)
 	}
@@ -398,8 +550,8 @@ func (m *mieruRuntime) handleUDP(proxyConn net.Conn, router *routeEngine) {
 		return
 	}
 	defer udpConn.Close()
-	_ = udpConn.SetReadBuffer(udpSocketBufferSize)
-	_ = udpConn.SetWriteBuffer(udpSocketBufferSize)
+	_ = udpConn.SetReadBuffer(udpAssociationSocketBufferSize)
+	_ = udpConn.SetWriteBuffer(udpAssociationSocketBufferSize)
 
 	local, ok := udpConn.LocalAddr().(*net.UDPAddr)
 	if !ok {
@@ -413,7 +565,7 @@ func (m *mieruRuntime) handleUDP(proxyConn net.Conn, router *routeEngine) {
 		return
 	}
 	tunnel := apicommon.NewPacketOverStreamTunnel(proxyConn)
-	var addrMap sync.Map
+	addrMap := newUDPHeaderCache()
 	var wg sync.WaitGroup
 	var closeOnce sync.Once
 	closeConnections := func() {
@@ -424,13 +576,16 @@ func (m *mieruRuntime) handleUDP(proxyConn net.Conn, router *routeEngine) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 1<<16)
+		buf := mieruUDPBufferPool.Get().([]byte)
+		defer mieruUDPBufferPool.Put(buf)
 		for {
+			_ = proxyConn.SetReadDeadline(time.Now().Add(udpAssociationIdleTimeout))
 			n, err := tunnel.Read(buf)
 			if err != nil {
 				closeOnce.Do(closeConnections)
 				return
 			}
+			_ = udpConn.SetReadDeadline(time.Now().Add(udpAssociationIdleTimeout))
 			addr, header, payload, err := parseMieruUDPDatagram(buf[:n])
 			if err != nil {
 				continue
@@ -445,9 +600,7 @@ func (m *mieruRuntime) handleUDP(proxyConn net.Conn, router *routeEngine) {
 				continue
 			}
 			key := canonicalUDPAddrPort(dst.AddrPort())
-			if stored, found := addrMap.Load(key); !found || !bytes.Equal(stored.([]byte), header) {
-				addrMap.Store(key, append([]byte(nil), header...))
-			}
+			addrMap.Store(key, header)
 			if _, err := udpConn.WriteToUDPAddrPort(payload, key); err != nil {
 				log.WithFields(log.Fields{"tag": m.tag, "destination": dst.String(), "err": err}).Debug("Write UDP destination failed")
 			}
@@ -455,18 +608,21 @@ func (m *mieruRuntime) handleUDP(proxyConn net.Conn, router *routeEngine) {
 	}()
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, maxSocks5UDPHeaderSize+maxSocks5UDPPayloadSize)
+		buf := mieruUDPBufferPool.Get().([]byte)
+		defer mieruUDPBufferPool.Put(buf)
 		payloadBuf := buf[maxSocks5UDPHeaderSize:]
 		for {
+			_ = udpConn.SetReadDeadline(time.Now().Add(udpAssociationIdleTimeout))
 			n, addr, err := udpConn.ReadFromUDPAddrPort(payloadBuf)
 			if err != nil {
 				closeOnce.Do(closeConnections)
 				return
 			}
+			_ = proxyConn.SetReadDeadline(time.Now().Add(udpAssociationIdleTimeout))
 			addr = canonicalUDPAddrPort(addr)
 			var header []byte
 			if stored, found := addrMap.Load(addr); found {
-				header = stored.([]byte)
+				header = stored
 			} else {
 				header, err = mieruUDPHeader(model.AddrSpec{IP: net.IP(addr.Addr().AsSlice()), Port: int(addr.Port())})
 				if err != nil {
@@ -519,11 +675,11 @@ func (m *mieruRuntime) Traffic(minTraffic int) ([]panel.UserTraffic, error) {
 	defer m.mu.Unlock()
 
 	threshold := int64(minTraffic * 1000)
-	result := make([]panel.UserTraffic, 0)
-	for _, user := range m.users {
-		name := m.userName(user.Id)
+	result := make([]panel.UserTraffic, 0, len(m.trafficUsers))
+	for uid := range m.trafficUsers {
+		name := m.userName(uid)
 		current := loadMieruTraffic(name)
-		committedValue, _ := committedTraffic.LoadOrStore(m.trafficKey(user.Id), trafficTotal{})
+		committedValue, _ := committedTraffic.LoadOrStore(m.trafficKey(uid), trafficTotal{})
 		committed := committedValue.(trafficTotal)
 		upload := current.upload - committed.upload
 		download := current.download - committed.download
@@ -532,12 +688,27 @@ func (m *mieruRuntime) Traffic(minTraffic int) ([]panel.UserTraffic, error) {
 			upload = current.upload
 			download = current.download
 		}
-		if upload+download <= threshold {
+		_, currentUser := m.users[uid]
+		active := len(m.conns[uid]) > 0
+		if upload == 0 && download == 0 {
+			if !active {
+				delete(m.trafficUsers, uid)
+				delete(m.pending, uid)
+			}
 			continue
 		}
-		m.pending[user.Id] = current
+		effectiveThreshold := threshold
+		if !currentUser {
+			// Flush the final bytes of a removed user even if they are below
+			// the normal reporting threshold.
+			effectiveThreshold = 0
+		}
+		if upload+download <= effectiveThreshold {
+			continue
+		}
+		m.pending[uid] = current
 		result = append(result, panel.UserTraffic{
-			UID:      user.Id,
+			UID:      uid,
 			Upload:   upload,
 			Download: download,
 		})
@@ -555,6 +726,10 @@ func (m *mieruRuntime) CommitTraffic(traffic []panel.UserTraffic) {
 		}
 		committedTraffic.Store(m.trafficKey(item.UID), current)
 		delete(m.pending, item.UID)
+		latest := loadMieruTraffic(m.userName(item.UID))
+		if latest == current && len(m.conns[item.UID]) == 0 {
+			delete(m.trafficUsers, item.UID)
+		}
 	}
 }
 
@@ -600,6 +775,7 @@ func (m *mieruRuntime) userByNameAndTrack(name string, conn net.Conn) (panel.Use
 		m.conns[uid] = connections
 	}
 	connections[conn] = struct{}{}
+	m.trafficUsers[uid] = struct{}{}
 	return user, true
 }
 

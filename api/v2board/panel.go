@@ -1,9 +1,10 @@
 package panel
 
 import (
-	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -16,6 +17,7 @@ import (
 
 type Client struct {
 	client           *resty.Client
+	reportClient     *resty.Client
 	APIHost          string
 	Token            string
 	NodeId           int
@@ -28,6 +30,7 @@ type Client struct {
 
 func New(c *conf.NodeConfig) (*Client, error) {
 	client := resty.New()
+	client.SetLogger(redactingRestyLogger{token: c.Key})
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
 		retryCount = *c.RetryCount
@@ -39,14 +42,6 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	} else {
 		client.SetTimeout(time.Duration(conf.DefaultNodeTimeout) * time.Second)
 	}
-	client.OnError(func(req *resty.Request, err error) {
-		var v *resty.ResponseError
-		if errors.As(err, &v) {
-			// v.Response contains the last response from the server
-			// v.Err contains the original error
-			logrus.Error(v.Err)
-		}
-	})
 	client.SetBaseURL(c.APIHost)
 	// set params
 	client.SetQueryParams(map[string]string{
@@ -54,12 +49,68 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		"node_id":   strconv.Itoa(c.NodeID),
 		"token":     c.Key,
 	})
+	// Do not automatically replay traffic and online-user POST requests inside
+	// one Resty call. A panel may have accepted a request whose response was
+	// lost, so an immediate transport retry increases duplicate-accounting risk.
+	reportClient := client.Clone().SetRetryCount(0)
 	return &Client{
-		client:   client,
-		Token:    c.Key,
-		APIHost:  c.APIHost,
-		NodeId:   c.NodeID,
-		UserList: &UserListBody{},
-		AliveMap: &AliveMap{},
+		client:       client,
+		reportClient: reportClient,
+		Token:        c.Key,
+		APIHost:      c.APIHost,
+		NodeId:       c.NodeID,
+		UserList:     &UserListBody{},
+		AliveMap:     &AliveMap{},
 	}, nil
+}
+
+type redactingRestyLogger struct {
+	token string
+}
+
+func (l redactingRestyLogger) Errorf(format string, values ...interface{}) {
+	logrus.Error(l.redact(fmt.Sprintf(format, values...)))
+}
+
+func (l redactingRestyLogger) Warnf(format string, values ...interface{}) {
+	logrus.Warn(l.redact(fmt.Sprintf(format, values...)))
+}
+
+func (l redactingRestyLogger) Debugf(format string, values ...interface{}) {
+	logrus.Debug(l.redact(fmt.Sprintf(format, values...)))
+}
+
+func (l redactingRestyLogger) redact(message string) string {
+	return redactSecret(message, l.token)
+}
+
+type panelRequestError struct {
+	err   error
+	token string
+}
+
+func (e panelRequestError) Error() string {
+	return redactSecret(e.err.Error(), e.token)
+}
+
+func (e panelRequestError) Unwrap() error {
+	return e.err
+}
+
+func (c *Client) requestError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return panelRequestError{err: err, token: c.Token}
+}
+
+func redactSecret(message, secret string) string {
+	if secret == "" {
+		return message
+	}
+	message = strings.ReplaceAll(message, secret, "[redacted]")
+	if escaped := url.QueryEscape(secret); escaped != secret {
+		message = strings.ReplaceAll(message, escaped, "[redacted]")
+	}
+	return message
 }

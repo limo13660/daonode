@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -96,7 +97,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		return nil, err
+		return nil, c.requestError(err)
 	}
 	if response == nil {
 		return nil, fmt.Errorf("received nil response")
@@ -224,22 +225,34 @@ func (t TlsSettings) PrimaryServerName() string {
 }
 
 func intervalToTime(value any) (time.Duration, error) {
+	const (
+		minimumIntervalSeconds int64 = 5
+		maximumIntervalSeconds int64 = 24 * 60 * 60
+	)
+	var seconds int64
 	switch v := value.(type) {
 	case nil:
 		return time.Minute, nil
 	case int:
-		return time.Duration(v) * time.Second, nil
+		seconds = int64(v)
 	case int64:
-		return time.Duration(v) * time.Second, nil
+		seconds = v
 	case float64:
-		return time.Duration(v) * time.Second, nil
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < math.MinInt64 || v > math.MaxInt64 {
+			return 0, fmt.Errorf("interval must be a whole number of seconds")
+		}
+		seconds = int64(v)
 	case string:
-		seconds, err := strconv.Atoi(v)
+		parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 		if err != nil {
 			return 0, err
 		}
-		return time.Duration(seconds) * time.Second, nil
+		seconds = parsed
 	default:
 		return 0, fmt.Errorf("unsupported value type %T", value)
 	}
+	if seconds < minimumIntervalSeconds || seconds > maximumIntervalSeconds {
+		return 0, fmt.Errorf("interval %d seconds is outside %d-%d seconds", seconds, minimumIntervalSeconds, maximumIntervalSeconds)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }

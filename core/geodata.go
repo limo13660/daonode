@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -19,6 +20,18 @@ type geoDataStore struct {
 	geoSitePath string
 	ipCache     sync.Map // country code -> []*net.IPNet
 	siteCache   sync.Map // country code -> []domainMatcher
+}
+
+var (
+	sharedGeoDataOnce sync.Once
+	sharedGeoData     *geoDataStore
+)
+
+func sharedGeoDataStore() *geoDataStore {
+	sharedGeoDataOnce.Do(func() {
+		sharedGeoData = newGeoDataStore()
+	})
+	return sharedGeoData
 }
 
 func newGeoDataStore() *geoDataStore {
@@ -295,6 +308,13 @@ func parseGeoDomain(data []byte) (domainMatcher, error) {
 			}
 			data = data[skip:]
 		}
+	}
+	if matcher.kind == "regexp" {
+		re, err := regexp.Compile(matcher.value)
+		if err != nil {
+			return domainMatcher{}, fmt.Errorf("compile GeoSite regexp %q: %w", matcher.value, err)
+		}
+		matcher.re = re
 	}
 	return matcher, nil
 }

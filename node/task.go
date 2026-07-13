@@ -93,32 +93,13 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 	// node no changed, check users
 	if newU != nil {
 		deleted, added, modified := compareUserList(c.userList, newU)
-		if len(deleted) > 0 {
-			// have deleted users
-			err = c.server.DelUsers(deleted, c.tag, c.info)
+		if len(deleted) > 0 || len(added) > 0 {
+			err = c.server.SyncUsers(c.tag, deleted, added)
 			if err != nil {
 				log.WithFields(log.Fields{
 					"tag": c.tag,
 					"err": err,
-				}).Error("Delete users failed")
-				if errors.Is(err, vCore.ErrRuntimeStopTimeout) {
-					c.requestRuntimeReload()
-				}
-				return nil
-			}
-		}
-		if len(added) > 0 {
-			// have added users
-			_, err = c.server.AddUsers(&vCore.AddUsersParams{
-				Tag:      c.tag,
-				NodeInfo: c.info,
-				Users:    added,
-			})
-			if err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Error("Add users failed")
+				}).Error("Synchronize users failed")
 				if errors.Is(err, vCore.ErrRuntimeStopTimeout) {
 					c.requestRuntimeReload()
 				}

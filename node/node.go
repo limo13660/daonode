@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/conf"
@@ -57,15 +58,24 @@ func (n *Node) Start(nodes []conf.NodeConfig, core *core.V2Core) error {
 }
 
 func (n *Node) Close() error {
+	var closes sync.WaitGroup
+	var errMu sync.Mutex
 	var firstErr error
 	for _, c := range n.controllers {
-		if err := c.Close(); err != nil {
-			log.Errorf("close controller failed: %v", err)
-			if firstErr == nil {
-				firstErr = err
+		closes.Add(1)
+		go func(current *Controller) {
+			defer closes.Done()
+			if err := current.Close(); err != nil {
+				log.Errorf("close controller failed: %v", err)
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
 			}
-		}
+		}(c)
 	}
+	closes.Wait()
 	n.controllers = nil
 	return firstErr
 }

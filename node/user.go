@@ -63,6 +63,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return err
 				}
+			} else {
+				c.limiter.MarkOnlineDeviceReported(result)
 			}
 		}
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
@@ -113,7 +115,10 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 		if o, ok := oldMap[u.Uuid]; !ok {
 			added = append(added, u)
 		} else {
-			if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit {
+			if o.Id != u.Id {
+				deleted = append(deleted, o)
+				added = append(added, u)
+			} else if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit {
 				modified = append(modified, u)
 			}
 			delete(oldMap, u.Uuid)

@@ -19,6 +19,7 @@ type protocolRuntime interface {
 	Stop() error
 	AddUsers([]panel.UserInfo) (int, error)
 	DelUsers([]panel.UserInfo) error
+	SyncUsers([]panel.UserInfo, []panel.UserInfo) error
 	Traffic(int) ([]panel.UserTraffic, error)
 	CommitTraffic([]panel.UserTraffic)
 }
@@ -44,15 +45,27 @@ func (v *V2Core) Start(_ []*panel.NodeInfo) error {
 
 func (v *V2Core) Close() error {
 	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	var firstErr error
-	for tag, runtime := range v.runtimes {
-		if err := runtime.Stop(); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("stop runtime %s: %w", tag, err)
-		}
-	}
+	runtimes := v.runtimes
 	v.runtimes = make(map[string]protocolRuntime)
+	v.mu.Unlock()
+
+	var stops sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	for tag, runtime := range runtimes {
+		stops.Add(1)
+		go func(currentTag string, currentRuntime protocolRuntime) {
+			defer stops.Done()
+			if err := currentRuntime.Stop(); err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("stop runtime %s: %w", currentTag, err)
+				}
+				errMu.Unlock()
+			}
+		}(tag, runtime)
+	}
+	stops.Wait()
 	return firstErr
 }
 
@@ -77,13 +90,13 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 
 func (v *V2Core) DelNode(tag string) error {
 	v.mu.Lock()
-	defer v.mu.Unlock()
-
 	runtime, exists := v.runtimes[tag]
 	if !exists {
+		v.mu.Unlock()
 		return nil
 	}
 	delete(v.runtimes, tag)
+	v.mu.Unlock()
 	return runtime.Stop()
 }
 
@@ -105,6 +118,18 @@ func (v *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo)
 		return fmt.Errorf("node %s does not exist", tag)
 	}
 	return runtime.DelUsers(users)
+}
+
+// SyncUsers applies deletions and additions as one runtime transaction so the
+// protocol can hot-update credentials or perform one coordinated fallback.
+func (v *V2Core) SyncUsers(tag string, deleted, added []panel.UserInfo) error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	runtime, exists := v.runtimes[tag]
+	if !exists {
+		return fmt.Errorf("node %s does not exist", tag)
+	}
+	return runtime.SyncUsers(deleted, added)
 }
 
 func (v *V2Core) GetUserTrafficSlice(tag string, minTraffic int) ([]panel.UserTraffic, error) {

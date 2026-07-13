@@ -9,6 +9,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 
+	"github.com/go-resty/resty/v2"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -42,7 +43,7 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		SetDoNotParseResponse(true).
 		Get(path)
 	if err != nil {
-		return nil, err
+		return nil, c.requestError(err)
 	}
 	if r == nil || r.RawResponse == nil {
 		return nil, fmt.Errorf("received nil response or raw response")
@@ -104,7 +105,7 @@ func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		return nil, err
+		return nil, c.requestError(err)
 	}
 	if r == nil || r.RawResponse == nil {
 		return nil, errors.New("received nil response or raw response")
@@ -136,13 +137,13 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
 	const path = "/api/v1/server/UniProxy/push"
-	response, err := c.client.R().
+	response, err := c.reportingClient().R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 	if err != nil {
-		return err
+		return c.requestError(err)
 	}
 	if response == nil || response.IsError() {
 		if response == nil {
@@ -155,14 +156,14 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
-	response, err := c.client.R().
+	response, err := c.reportingClient().R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 
 	if err != nil {
-		return err
+		return c.requestError(err)
 	}
 	if response == nil || response.IsError() {
 		if response == nil {
@@ -172,4 +173,11 @@ func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]stri
 	}
 
 	return nil
+}
+
+func (c *Client) reportingClient() *resty.Client {
+	if c.reportClient != nil {
+		return c.reportClient
+	}
+	return c.client
 }

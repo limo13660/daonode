@@ -19,7 +19,10 @@ import (
 
 var errRouteBlocked = errors.New("connection blocked by route rule")
 
-const udpDNSCacheTTL = 5 * time.Minute
+const (
+	udpDNSCacheTTL        = 5 * time.Minute
+	udpDNSCacheMaxEntries = 4096
+)
 
 type routeDecision uint8
 
@@ -29,9 +32,10 @@ const (
 )
 
 type routeEngine struct {
-	rules       []compiledRoute
-	udpDNSCache sync.Map
-	geoData     *geoDataStore
+	rules         []compiledRoute
+	udpDNSCacheMu sync.Mutex
+	udpDNSCache   map[string]udpDNSCacheEntry
+	geoData       *geoDataStore
 }
 
 type udpDNSCacheEntry struct {
@@ -69,14 +73,18 @@ type portRange struct {
 }
 
 func newRouteEngine(routes []panel.Route) (*routeEngine, error) {
-	return newRouteEngineWithGeoData(routes, newGeoDataStore())
+	return newRouteEngineWithGeoData(routes, sharedGeoDataStore())
 }
 
 func newRouteEngineWithGeoData(routes []panel.Route, geoData *geoDataStore) (*routeEngine, error) {
 	if geoData == nil {
 		geoData = newGeoDataStore()
 	}
-	engine := &routeEngine{rules: make([]compiledRoute, 0, len(routes)), geoData: geoData}
+	engine := &routeEngine{
+		rules:       make([]compiledRoute, 0, len(routes)),
+		udpDNSCache: make(map[string]udpDNSCacheEntry),
+		geoData:     geoData,
+	}
 	for _, route := range routes {
 		rule := compiledRoute{id: route.Id, action: strings.ToLower(strings.TrimSpace(route.Action))}
 		var err error
@@ -189,13 +197,14 @@ func (r *routeEngine) cachedUDPIP(host string, now time.Time) (net.IP, bool) {
 	if key == "" {
 		return nil, false
 	}
-	value, ok := r.udpDNSCache.Load(key)
+	r.udpDNSCacheMu.Lock()
+	defer r.udpDNSCacheMu.Unlock()
+	entry, ok := r.udpDNSCache[key]
 	if !ok {
 		return nil, false
 	}
-	entry := value.(udpDNSCacheEntry)
 	if !now.Before(entry.expiresAt) {
-		r.udpDNSCache.Delete(key)
+		delete(r.udpDNSCache, key)
 		return nil, false
 	}
 	return append(net.IP(nil), entry.ip...), true
@@ -206,10 +215,28 @@ func (r *routeEngine) storeUDPIP(host string, ip net.IP, now time.Time) {
 	if key == "" || ip == nil {
 		return
 	}
-	r.udpDNSCache.Store(key, udpDNSCacheEntry{
+	r.udpDNSCacheMu.Lock()
+	defer r.udpDNSCacheMu.Unlock()
+	if r.udpDNSCache == nil {
+		r.udpDNSCache = make(map[string]udpDNSCacheEntry)
+	}
+	if _, exists := r.udpDNSCache[key]; !exists && len(r.udpDNSCache) >= udpDNSCacheMaxEntries {
+		for cachedHost, entry := range r.udpDNSCache {
+			if !now.Before(entry.expiresAt) {
+				delete(r.udpDNSCache, cachedHost)
+			}
+		}
+		if len(r.udpDNSCache) >= udpDNSCacheMaxEntries {
+			for cachedHost := range r.udpDNSCache {
+				delete(r.udpDNSCache, cachedHost)
+				break
+			}
+		}
+	}
+	r.udpDNSCache[key] = udpDNSCacheEntry{
 		ip:        append(net.IP(nil), ip...),
 		expiresAt: now.Add(udpDNSCacheTTL),
-	})
+	}
 }
 
 func normalizeDNSCacheHost(host string) string {
