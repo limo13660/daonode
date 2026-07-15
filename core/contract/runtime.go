@@ -11,7 +11,8 @@ import (
 var ErrRuntimeStopTimeout = errors.New("core runtime stop timed out")
 
 // Runtime is the lifecycle contract implemented by every core/<kernel>
-// adapter.
+// adapter. Traffic and CommitTraffic should normally be supplied by embedding
+// core/shared.RuntimeServices.
 type Runtime interface {
 	Start() error
 	Stop() error

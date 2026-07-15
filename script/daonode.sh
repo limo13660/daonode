@@ -103,15 +103,33 @@ before_show_menu() {
     show_menu
 }
 
+run_installer() {
+    local installer_tmp
+    local status
+
+    installer_tmp=$(mktemp /tmp/daonode-installer.XXXXXX) || return 1
+    if ! curl -fL --retry 2 --retry-max-time 120 --connect-timeout 15 --max-time 120 -sS \
+        -o "$installer_tmp" https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh; then
+        rm -f "$installer_tmp"
+        echo -e "${red}下载安装脚本失败，请检查本机能否连接 Github${plain}"
+        return 1
+    fi
+    bash "$installer_tmp" "$@"
+    status=$?
+    rm -f "$installer_tmp"
+    return $status
+}
+
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh)
-    if [[ $? == 0 ]]; then
+    if run_installer; then
         if [[ $# == 0 ]]; then
             start
         else
             start 0
         fi
+        return 0
     fi
+    return 1
 }
 
 update() {
@@ -120,8 +138,7 @@ update() {
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh) $version
-    if [[ $? == 0 ]]; then
+    if run_installer "$version"; then
         echo -e "${green}更新完成，已自动重启 daonode，请使用 daonode log 查看运行日志${plain}"
         exit
     fi
@@ -129,6 +146,7 @@ update() {
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
+    return 1
 }
 
 config() {

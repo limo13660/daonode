@@ -48,15 +48,13 @@ daonode 不复制 Mieru 源码，而是通过 Go module 直接链接官方 `gith
 | `go.mod`、`go.sum` | 锁定 Mieru 版本和校验值 |
 | `core/core.go` | 根据面板下发的 `kernel` 与 `protocol` 校验能力并创建对应内核运行时 |
 | `core/contract/runtime.go` | 所有内核统一实现的生命周期、用户同步和流量统计接口 |
-| `core/mieru/runtime.go` | Mieru Server API、TCP/UDP 监听、端口绑定、用户同步、Traffic Pattern、User Hint、SOCKS5 TCP/UDP 转发、流量统计 |
+| `core/shared/runtime.go` | 所有内核共用的累计流量差量、上报提交、限速、设备限制、在线连接跟踪和删用户连接清理 |
+| `core/mieru/runtime.go` | Mieru Server API、TCP/UDP 监听、端口绑定、认证用户同步、Traffic Pattern、User Hint、SOCKS5 TCP/UDP 转发和原始累计计数读取 |
 | `api/v2board/node.go` | 将 DaoBoard 节点配置解析为 Mieru 通用配置；校验传输协议、端口、端口范围和 User Hint 字段 |
 | `node/controller.go` | 节点生命周期、配置热更新、拉取用户、上报在线状态和流量 |
 | `node/node.go`、`node/user.go` | 节点运行循环和用户增删同步 |
 | `core/mieru/route.go` | Mieru 请求的 TCP、UDP 路由、DNS 解析和规则匹配 |
 | `core/mieru/geodata.go` | `geoip.dat`、`geosite.dat` 读取及 `geoip:private` 内置规则 |
-| `core/mieru/*_test.go` | 官方 Traffic Pattern、端口绑定、User Hint、TCP/UDP 集成测试 |
-| `node/controller_integration_test.go` | DaoBoard 到 Mieru Server API 的端到端测试 |
-| `api/v2board/node_test.go`、`api/v2board/panel_integration_test.go` | 面板配置解析和字段兼容测试 |
 | `.github/workflows/release.yml` | Linux 构建、打包 GeoIP/GeoSite 和发布包 |
 | `script/install.sh` | 安装二进制、配置、路由数据和 systemd 服务 |
 
@@ -101,7 +99,9 @@ github.com/enfein/mieru/v3/pkg/metrics
 
 面板配置必须同时下发 `protocol` 和 `kernel`。`core/core.go` 会先检查所选内核是否明确支持该协议，再创建运行时；未下发 `kernel`、内核不存在或协议不受支持时，节点会拒绝启动或重载，不再为旧配置自动选择 Mieru。
 
-每个新内核必须放在独立的 `core/<kernel>/` 目录，实现 `core/contract.Runtime`，并在根内核能力表中登记其支持的协议。不要只增加面板下拉选项；面板能力表、保存校验、配置下发、后端适配和测试必须一起完成。
+每个新内核必须放在独立的 `core/<kernel>/` 目录，实现 `core/contract.Runtime`，并在根内核能力表中登记其支持的协议。不要只增加面板下拉选项；面板能力表、保存校验、配置下发、后端适配和运行验证必须一起完成。
+
+新内核应匿名嵌入 `core/shared.RuntimeServices`，只实现协议相关的启动停止、认证用户同步、连接处理和按 UID 读取原始累计流量。认证成功后统一调用 `OpenConnection`，用户事务成功后统一调用 `SyncUsers`；流量差量、失败重试、提交确认、计数器重置、限速、设备数和连接释放不应在各内核中重复实现。
 
 ## 安装
 

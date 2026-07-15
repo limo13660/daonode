@@ -175,23 +175,23 @@ install_base() {
             echo "安装 EPEL 源..."
             yum install -y epel-release >/dev/null 2>&1
         fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv
+        need_install_yum wget curl unzip tar cronie socat ca-certificates
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv
+        need_install_apk wget curl unzip tar socat ca-certificates
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv
+        need_install_apt wget curl unzip tar cron socat ca-certificates
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"ubuntu" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv
+        need_install_apt wget curl unzip tar cron socat ca-certificates
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"arch" ]]; then
         echo "更新包数据库..."
         pacman -Sy --noconfirm >/dev/null 2>&1
         # --needed 会跳过已安装的包，非常高效
         echo "安装必需的包..."
-        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates pv >/dev/null 2>&1
+        pacman -S --noconfirm --needed wget curl unzip tar cronie socat ca-certificates >/dev/null 2>&1
     fi
 }
 
@@ -294,45 +294,111 @@ EOF
         fi
 }
 
+download_release() {
+    local url="$1"
+    local destination="$2"
+    local partial="${destination}.part"
+
+    rm -f "$partial"
+    echo -e "${yellow}安装包约 24 MiB，低速网络可能需要数分钟；下载最长等待 30 分钟。${plain}"
+    if ! curl -fL \
+        --retry 2 \
+        --retry-delay 2 \
+        --retry-max-time 1800 \
+        --connect-timeout 15 \
+        --max-time 1800 \
+        --speed-limit 1024 \
+        --speed-time 60 \
+        --progress-bar \
+        -o "$partial" \
+        "$url"; then
+        rm -f "$partial"
+        return 1
+    fi
+    if [[ ! -s "$partial" ]]; then
+        rm -f "$partial"
+        return 1
+    fi
+    mv -f "$partial" "$destination"
+}
+
 install_daonode() {
     local version_param="$1"
-    if [[ -e /usr/local/daonode/ ]]; then
-        rm -rf /usr/local/daonode/
-    fi
+    local install_dir="/usr/local/daonode"
+    local previous_dir="/usr/local/daonode.previous"
+    local archive
+    local stage_dir
+    local manager_tmp=""
 
-    mkdir /usr/local/daonode/ -p
-    cd /usr/local/daonode/
+    archive=$(mktemp /tmp/daonode-linux.XXXXXX) || exit 1
+    stage_dir=$(mktemp -d /usr/local/daonode.new.XXXXXX) || {
+        rm -f "$archive"
+        exit 1
+    }
 
     if  [[ -z "$version_param" ]] ; then
-        last_version=$(curl -Ls "https://api.github.com/repos/limo13660/daonode/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -fsSL --retry 2 --retry-max-time 120 --connect-timeout 15 --max-time 60 \
+            "https://api.github.com/repos/limo13660/daonode/releases/latest" | \
+            grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             echo -e "${red}检测 daonode 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 daonode 版本安装${plain}"
+            rm -rf "$stage_dir"
+            rm -f "$archive"
             exit 1
         fi
         echo -e "${green}检测到最新版本：${last_version}，开始安装...${plain}"
         url="https://github.com/limo13660/daonode/releases/download/${last_version}/daonode-linux-${arch}.zip"
-        if ! curl -fL --retry 3 --connect-timeout 15 "$url" | pv -W -N "下载进度" > /usr/local/daonode/daonode-linux.zip; then
+        if ! download_release "$url" "$archive"; then
             echo -e "${red}下载 daonode 失败，请确保你的服务器能够下载 Github 的文件${plain}"
+            rm -rf "$stage_dir"
+            rm -f "$archive"
             exit 1
         fi
     else
     last_version=$version_param
         url="https://github.com/limo13660/daonode/releases/download/${last_version}/daonode-linux-${arch}.zip"
-        if ! curl -fL --retry 3 --connect-timeout 15 "$url" | pv -W -N "下载进度" > /usr/local/daonode/daonode-linux.zip; then
+        if ! download_release "$url" "$archive"; then
             echo -e "${red}下载 daonode $1 失败，请确保此版本存在${plain}"
+            rm -rf "$stage_dir"
+            rm -f "$archive"
             exit 1
         fi
     fi
 
-    if ! unzip -tq daonode-linux.zip >/dev/null 2>&1; then
+    if ! unzip -tq "$archive" >/dev/null 2>&1; then
         echo -e "${red}下载的安装包不是有效 ZIP 文件，请确认 Release 和架构名称是否正确${plain}"
+        rm -rf "$stage_dir"
+        rm -f "$archive"
         exit 1
     fi
-    if ! unzip -o daonode-linux.zip; then
+    if ! unzip -oq "$archive" -d "$stage_dir"; then
         echo -e "${red}解压 daonode 安装包失败${plain}"
+        rm -rf "$stage_dir"
+        rm -f "$archive"
         exit 1
     fi
-    rm daonode-linux.zip -f
+    rm -f "$archive"
+    if [[ ! -f "$stage_dir/daonode" ]]; then
+        echo -e "${red}安装包中缺少 daonode 可执行文件${plain}"
+        rm -rf "$stage_dir"
+        exit 1
+    fi
+    chmod 0755 "$stage_dir"
+    chmod +x "$stage_dir/daonode"
+
+    rm -rf "$previous_dir"
+    if [[ -d "$install_dir" ]]; then
+        mv "$install_dir" "$previous_dir"
+    fi
+    if ! mv "$stage_dir" "$install_dir"; then
+        echo -e "${red}替换 daonode 安装目录失败${plain}"
+        if [[ -d "$previous_dir" ]]; then
+            mv "$previous_dir" "$install_dir"
+        fi
+        exit 1
+    fi
+
+    cd "$install_dir" || exit 1
     chmod +x daonode
     mkdir /etc/daonode/ -p
     cat <<'EOF' > /usr/local/daonode/count-start.sh
@@ -442,11 +508,20 @@ EOF
     fi
 
 
-    curl -o /usr/bin/daonode -Ls https://raw.githubusercontent.com/limo13660/daonode/main/script/daonode.sh
-    chmod +x /usr/bin/daonode
+    manager_tmp=$(mktemp /tmp/daonode-manager.XXXXXX) || true
+    if [[ -n "$manager_tmp" ]] && curl -fL --retry 2 --retry-max-time 120 --connect-timeout 15 --max-time 120 -sS \
+        -o "$manager_tmp" https://raw.githubusercontent.com/limo13660/daonode/main/script/daonode.sh; then
+        install -m 0755 "$manager_tmp" /usr/bin/daonode
+    else
+        echo -e "${yellow}管理脚本更新失败，保留现有 /usr/bin/daonode${plain}"
+    fi
+    if [[ -n "$manager_tmp" ]]; then
+        rm -f "$manager_tmp"
+    fi
 
-    cd $cur_dir
-    rm -f install.sh
+    rm -rf "$previous_dir"
+
+    cd "$cur_dir" || exit 1
     echo "------------------------------------------"
     echo -e "管理脚本使用方法: "
     echo "------------------------------------------"

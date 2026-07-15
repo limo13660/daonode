@@ -77,10 +77,10 @@ func filterTrafficByMinimum(traffic []panel.UserTraffic, minimum int) []panel.Us
 	if minimum <= 0 {
 		return traffic
 	}
-	threshold := int64(minimum * 1000)
+	threshold := int64(minimum) * 1000
 	result := make([]panel.UserTraffic, 0, len(traffic))
 	for _, item := range traffic {
-		if item.Upload+item.Download > threshold {
+		if item.ForceReport || item.Upload+item.Download > threshold {
 			result = append(result, item)
 		}
 	}
@@ -91,7 +91,7 @@ func filterOnlineUsers(online []panel.OnlineUser, traffic []panel.UserTraffic, m
 	if minimum <= 0 {
 		return online
 	}
-	threshold := int64(minimum * 1000)
+	threshold := int64(minimum) * 1000
 	totals := make(map[int]int64, len(traffic))
 	for _, item := range traffic {
 		totals[item.UID] = item.Upload + item.Download

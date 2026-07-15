@@ -128,6 +128,8 @@ type UserTraffic struct {
 	UID      int
 	Upload   int64
 	Download int64
+	// ForceReport bypasses the local minimum for a removed user's final bytes.
+	ForceReport bool `json:"-" msgpack:"-"`
 }
 
 // ReportUserTraffic reports the user traffic

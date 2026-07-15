@@ -26,20 +26,11 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	panel "github.com/limo13660/daonode/api/v2board"
-	"github.com/limo13660/daonode/common/format"
-	"github.com/limo13660/daonode/common/rate"
 	"github.com/limo13660/daonode/core/contract"
-	"github.com/limo13660/daonode/limiter"
+	"github.com/limo13660/daonode/core/shared"
 )
 
-type trafficTotal struct {
-	upload   int64
-	download int64
-}
-
 var mieruStopTimeout = 5 * time.Second
-
-var committedTraffic sync.Map // node tag + user ID -> trafficTotal
 
 const (
 	udpListenerSocketBufferSize    = 4 << 20
@@ -136,17 +127,16 @@ func (l *mieruListenerFactory) rewriteAddress(address string) (string, error) {
 }
 
 type mieruRuntime struct {
+	*shared.RuntimeServices
+
 	tag  string
 	info *panel.NodeInfo
 
-	mu           sync.RWMutex
-	server       mieruserver.Server
-	stopCh       chan struct{}
-	router       *routeEngine
-	users        map[int]panel.UserInfo
-	pending      map[int]trafficTotal
-	conns        map[int]map[net.Conn]struct{}
-	trafficUsers map[int]struct{}
+	mu     sync.RWMutex
+	server mieruserver.Server
+	stopCh chan struct{}
+	router *routeEngine
+	users  map[int]panel.UserInfo
 	// credentials includes active users plus a bounded set of deleted-user
 	// tombstones. Application-level lookup still rejects deleted users, while
 	// retaining the password keeps same-credential renewals from destabilizing
@@ -160,15 +150,14 @@ type mieruUserUpdater interface {
 
 // NewRuntime creates the Mieru adapter used by the root core dispatcher.
 func NewRuntime(tag string, info *panel.NodeInfo) contract.Runtime {
-	return &mieruRuntime{
-		tag:          tag,
-		info:         info,
-		users:        make(map[int]panel.UserInfo),
-		pending:      make(map[int]trafficTotal),
-		conns:        make(map[int]map[net.Conn]struct{}),
-		trafficUsers: make(map[int]struct{}),
-		credentials:  make(map[int]string),
+	runtime := &mieruRuntime{
+		tag:         tag,
+		info:        info,
+		users:       make(map[int]panel.UserInfo),
+		credentials: make(map[int]string),
 	}
+	runtime.RuntimeServices = shared.NewRuntimeServices(tag, runtime.loadTraffic)
+	return runtime
 }
 
 func (m *mieruRuntime) Start() error {
@@ -241,9 +230,7 @@ func (m *mieruRuntime) SyncUsers(deleted, added []panel.UserInfo) error {
 					return fmt.Errorf("hot-update Mieru users: %w", err)
 				}
 			}
-			for _, user := range deleted {
-				m.closeUserConnectionsLocked(user.Id)
-			}
+			m.RuntimeServices.SyncUsers(deleted, added)
 			log.WithFields(log.Fields{
 				"tag":            m.tag,
 				"users":          len(m.users),
@@ -270,9 +257,7 @@ func (m *mieruRuntime) SyncUsers(deleted, added []panel.UserInfo) error {
 		}
 		return err
 	}
-	for _, user := range deleted {
-		m.closeUserConnectionsLocked(user.Id)
-	}
+	m.RuntimeServices.SyncUsers(deleted, added)
 	return nil
 }
 
@@ -381,9 +366,7 @@ func (m *mieruRuntime) mieruServerUsersLocked() []*appctlpb.User {
 
 func (m *mieruRuntime) stopLocked(closeConnections bool) error {
 	if closeConnections {
-		for uid := range m.conns {
-			m.closeUserConnectionsLocked(uid)
-		}
+		m.RuntimeServices.CloseAllConnections()
 	}
 	if m.server == nil {
 		return nil
@@ -460,26 +443,16 @@ func (m *mieruRuntime) handleConnection(proxyConn net.Conn, request *model.Reque
 	if !ok {
 		return
 	}
-	user, ok := m.userByNameAndTrack(userContext.UserName(), proxyConn)
+	user, ok := m.userByName(userContext.UserName())
 	if !ok {
 		return
 	}
-	defer m.untrackConnection(user.Id, proxyConn)
-
-	nodeLimiter, err := limiter.GetLimiter(m.tag)
-	if err != nil {
+	limitedConn, release, ok := m.RuntimeServices.OpenConnection(user, proxyConn, true)
+	if !ok {
 		return
 	}
-	ip := remoteIP(proxyConn.RemoteAddr())
-	userTag := format.UserTag(m.tag, user.Uuid)
-	bucket, reject := nodeLimiter.CheckLimit(userTag, ip, true)
-	if reject {
-		return
-	}
-	defer nodeLimiter.ReleaseConnection(userTag, ip)
-	if bucket != nil {
-		proxyConn = rate.NewConnRateLimiter(proxyConn, bucket)
-	}
+	defer release()
+	proxyConn = limitedConn
 
 	switch request.Command {
 	case constant.Socks5ConnectCmd:
@@ -668,69 +641,6 @@ func mieruUDPHeader(addr model.AddrSpec) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-func (m *mieruRuntime) Traffic(minTraffic int) ([]panel.UserTraffic, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	threshold := int64(minTraffic * 1000)
-	result := make([]panel.UserTraffic, 0, len(m.trafficUsers))
-	for uid := range m.trafficUsers {
-		name := m.userName(uid)
-		current := loadMieruTraffic(name)
-		committedValue, _ := committedTraffic.LoadOrStore(m.trafficKey(uid), trafficTotal{})
-		committed := committedValue.(trafficTotal)
-		upload := current.upload - committed.upload
-		download := current.download - committed.download
-		if upload < 0 || download < 0 {
-			committed = trafficTotal{}
-			upload = current.upload
-			download = current.download
-		}
-		_, currentUser := m.users[uid]
-		active := len(m.conns[uid]) > 0
-		if upload == 0 && download == 0 {
-			if !active {
-				delete(m.trafficUsers, uid)
-				delete(m.pending, uid)
-			}
-			continue
-		}
-		effectiveThreshold := threshold
-		if !currentUser {
-			// Flush the final bytes of a removed user even if they are below
-			// the normal reporting threshold.
-			effectiveThreshold = 0
-		}
-		if upload+download <= effectiveThreshold {
-			continue
-		}
-		m.pending[uid] = current
-		result = append(result, panel.UserTraffic{
-			UID:      uid,
-			Upload:   upload,
-			Download: download,
-		})
-	}
-	return result, nil
-}
-
-func (m *mieruRuntime) CommitTraffic(traffic []panel.UserTraffic) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, item := range traffic {
-		current, ok := m.pending[item.UID]
-		if !ok {
-			continue
-		}
-		committedTraffic.Store(m.trafficKey(item.UID), current)
-		delete(m.pending, item.UID)
-		latest := loadMieruTraffic(m.userName(item.UID))
-		if latest == current && len(m.conns[item.UID]) == 0 {
-			delete(m.trafficUsers, item.UID)
-		}
-	}
-}
-
 func (m *mieruRuntime) userName(uid int) string {
 	return fmt.Sprintf("%su%d", m.info.Common.UserNamePrefix, uid)
 }
@@ -755,45 +665,6 @@ func (m *mieruRuntime) userByNameLocked(name string) (panel.UserInfo, bool) {
 	return user, ok
 }
 
-func (m *mieruRuntime) trafficKey(uid int) string {
-	return fmt.Sprintf("%s\x00%d", m.tag, uid)
-}
-
-func (m *mieruRuntime) userByNameAndTrack(name string, conn net.Conn) (panel.UserInfo, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	user, ok := m.userByNameLocked(name)
-	if !ok {
-		return panel.UserInfo{}, false
-	}
-	uid := user.Id
-	connections := m.conns[uid]
-	if connections == nil {
-		connections = make(map[net.Conn]struct{})
-		m.conns[uid] = connections
-	}
-	connections[conn] = struct{}{}
-	m.trafficUsers[uid] = struct{}{}
-	return user, true
-}
-
-func (m *mieruRuntime) untrackConnection(uid int, conn net.Conn) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	connections := m.conns[uid]
-	delete(connections, conn)
-	if len(connections) == 0 {
-		delete(m.conns, uid)
-	}
-}
-
-func (m *mieruRuntime) closeUserConnectionsLocked(uid int) {
-	for conn := range m.conns[uid] {
-		_ = conn.Close()
-	}
-	delete(m.conns, uid)
-}
-
 func (m *mieruRuntime) routerSnapshot() *routeEngine {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -803,17 +674,18 @@ func (m *mieruRuntime) routerSnapshot() *routeEngine {
 	return m.router
 }
 
-func loadMieruTraffic(userName string) trafficTotal {
-	var total trafficTotal
+func (m *mieruRuntime) loadTraffic(uid int) (shared.TrafficTotal, error) {
+	var total shared.TrafficTotal
+	userName := m.userName(uid)
 	for _, metric := range metrics.GetMetricsForUser(userName) {
 		switch metric.Name() {
 		case metrics.UserMetricUploadBytes:
-			total.upload = metric.Load()
+			total.Upload = metric.Load()
 		case metrics.UserMetricDownloadBytes:
-			total.download = metric.Load()
+			total.Download = metric.Load()
 		}
 	}
-	return total
+	return total, nil
 }
 
 func mieruTransport(value string) (*appctlpb.TransportProtocol, error) {
@@ -902,15 +774,4 @@ func decodeMieruTrafficPattern(value string) (*appctlpb.TrafficPattern, error) {
 		return nil, fmt.Errorf("validate official Mieru traffic pattern: %w", err)
 	}
 	return pattern, nil
-}
-
-func remoteIP(addr net.Addr) string {
-	if addr == nil {
-		return ""
-	}
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return addr.String()
-	}
-	return host
 }
