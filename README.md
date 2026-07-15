@@ -46,13 +46,15 @@ daonode 不复制 Mieru 源码，而是通过 Go module 直接链接官方 `gith
 | 文件 | 内核适配职责 |
 |---|---|
 | `go.mod`、`go.sum` | 锁定 Mieru 版本和校验值 |
-| `core/mieru.go` | Mieru Server API、TCP/UDP 监听、端口绑定、用户同步、Traffic Pattern、User Hint、SOCKS5 TCP/UDP 转发、流量统计 |
+| `core/core.go` | 根据面板下发的 `kernel` 与 `protocol` 校验能力并创建对应内核运行时 |
+| `core/contract/runtime.go` | 所有内核统一实现的生命周期、用户同步和流量统计接口 |
+| `core/mieru/runtime.go` | Mieru Server API、TCP/UDP 监听、端口绑定、用户同步、Traffic Pattern、User Hint、SOCKS5 TCP/UDP 转发、流量统计 |
 | `api/v2board/node.go` | 将 DaoBoard 节点配置解析为 Mieru 通用配置；校验传输协议、端口、端口范围和 User Hint 字段 |
 | `node/controller.go` | 节点生命周期、配置热更新、拉取用户、上报在线状态和流量 |
 | `node/node.go`、`node/user.go` | 节点运行循环和用户增删同步 |
-| `core/route.go` | Mieru 请求的 TCP、UDP 路由、DNS 解析和规则匹配 |
-| `core/geodata.go` | `geoip.dat`、`geosite.dat` 读取及 `geoip:private` 内置规则 |
-| `core/mieru_test.go` | 官方 Traffic Pattern、端口绑定、User Hint、TCP/UDP 集成测试 |
+| `core/mieru/route.go` | Mieru 请求的 TCP、UDP 路由、DNS 解析和规则匹配 |
+| `core/mieru/geodata.go` | `geoip.dat`、`geosite.dat` 读取及 `geoip:private` 内置规则 |
+| `core/mieru/*_test.go` | 官方 Traffic Pattern、端口绑定、User Hint、TCP/UDP 集成测试 |
 | `node/controller_integration_test.go` | DaoBoard 到 Mieru Server API 的端到端测试 |
 | `api/v2board/node_test.go`、`api/v2board/panel_integration_test.go` | 面板配置解析和字段兼容测试 |
 | `.github/workflows/release.yml` | Linux 构建、打包 GeoIP/GeoSite 和发布包 |
@@ -81,7 +83,7 @@ github.com/enfein/mieru/v3/pkg/metrics
    go mod tidy
    ```
 
-3. 优先检查 `core/mieru.go` 和 `api/v2board/node.go` 的编译错误及 API 变化，重点确认 `ServerConfig`、`AdvancedSettings`、`PortBinding`、`TransportProtocol`、Traffic Pattern 和 Packet Listener 接口。
+3. 优先检查 `core/mieru/runtime.go` 和 `api/v2board/node.go` 的编译错误及 API 变化，重点确认 `ServerConfig`、`AdvancedSettings`、`PortBinding`、`TransportProtocol`、Traffic Pattern 和 Packet Listener 接口。
 4. 运行完整测试和 Linux 构建：
 
    ```bash
@@ -93,7 +95,13 @@ github.com/enfein/mieru/v3/pkg/metrics
 6. 更新 README 中的 Mieru 版本和上游文档链接，再检查 `.github/workflows/release.yml` 的构建产物和 `script/install.sh` 的安装路径。
 7. 先在测试节点滚动升级，确认 `journalctl -u daonode`、TCP/UDP 连接和流量上报正常后，再替换生产二进制。升级失败时保留上一版二进制和 `go.mod/go.sum` 进行回滚。
 
-不要直接修改 `core/mieru.go` 来复制官方协议实现；协议、加密、重放检测、拥塞控制和 Traffic Pattern 应继续由官方 Mieru API 处理，daonode 只维护面板字段映射、生命周期和路由集成。
+不要直接修改 `core/mieru/runtime.go` 来复制官方协议实现；协议、加密、重放检测、拥塞控制和 Traffic Pattern 应继续由官方 Mieru API 处理，daonode 只维护面板字段映射、生命周期和路由集成。
+
+## 多内核约定
+
+面板配置同时下发 `protocol` 和 `kernel`。`core/core.go` 会先检查所选内核是否明确支持该协议，再创建运行时；旧面板未下发 `kernel` 时，Mieru 协议会兼容默认到 `mieru` 内核。
+
+每个新内核必须放在独立的 `core/<kernel>/` 目录，实现 `core/contract.Runtime`，并在根内核能力表中登记其支持的协议。不要只增加面板下拉选项；面板能力表、保存校验、配置下发、后端适配和测试必须一起完成。
 
 ## 安装
 

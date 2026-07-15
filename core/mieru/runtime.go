@@ -1,4 +1,4 @@
-package core
+package mieru
 
 import (
 	"bytes"
@@ -28,6 +28,7 @@ import (
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/common/format"
 	"github.com/limo13660/daonode/common/rate"
+	"github.com/limo13660/daonode/core/contract"
 	"github.com/limo13660/daonode/limiter"
 )
 
@@ -35,10 +36,6 @@ type trafficTotal struct {
 	upload   int64
 	download int64
 }
-
-// ErrRuntimeStopTimeout means the Mieru lifecycle is no longer safe to
-// recover in-process. The service supervisor should replace the process.
-var ErrRuntimeStopTimeout = errors.New("mieru runtime stop timed out")
 
 var mieruStopTimeout = 5 * time.Second
 
@@ -161,7 +158,8 @@ type mieruUserUpdater interface {
 	UpdateUsers([]*appctlpb.User) error
 }
 
-func newMieruRuntime(tag string, info *panel.NodeInfo) *mieruRuntime {
+// NewRuntime creates the Mieru adapter used by the root core dispatcher.
+func NewRuntime(tag string, info *panel.NodeInfo) contract.Runtime {
 	return &mieruRuntime{
 		tag:          tag,
 		info:         info,
@@ -190,7 +188,7 @@ func (m *mieruRuntime) Stop() error {
 	case err := <-done:
 		return err
 	case <-time.After(mieruStopTimeout):
-		return fmt.Errorf("%w while acquiring the runtime lock", ErrRuntimeStopTimeout)
+		return fmt.Errorf("%w while acquiring the runtime lock", contract.ErrRuntimeStopTimeout)
 	}
 }
 
@@ -264,7 +262,7 @@ func (m *mieruRuntime) SyncUsers(deleted, added []panel.UserInfo) error {
 	}
 	if err := m.restartLocked(); err != nil {
 		m.users = previous
-		if errors.Is(err, ErrRuntimeStopTimeout) {
+		if errors.Is(err, contract.ErrRuntimeStopTimeout) {
 			return err
 		}
 		if recoverErr := m.restartLocked(); recoverErr != nil {
@@ -404,7 +402,7 @@ func (m *mieruRuntime) stopLocked(closeConnections bool) error {
 	case err := <-done:
 		return err
 	case <-time.After(mieruStopTimeout):
-		return fmt.Errorf("%w after %s", ErrRuntimeStopTimeout, mieruStopTimeout)
+		return fmt.Errorf("%w after %s", contract.ErrRuntimeStopTimeout, mieruStopTimeout)
 	}
 }
 

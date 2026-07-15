@@ -1,4 +1,4 @@
-package core
+package mieru
 
 import (
 	"fmt"

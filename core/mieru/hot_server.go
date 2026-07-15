@@ -1,4 +1,4 @@
-package core
+package mieru
 
 // The server adapter follows the Mieru v3 server integration model from
 // github.com/enfein/mieru/v3, which is distributed under GPL-3.0.

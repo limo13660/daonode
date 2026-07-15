@@ -23,6 +23,7 @@ const (
 type NodeInfo struct {
 	Id           int
 	Type         string
+	Kernel       string
 	Security     int
 	PushInterval time.Duration
 	PullInterval time.Duration
@@ -32,6 +33,7 @@ type NodeInfo struct {
 
 type CommonNode struct {
 	Protocol            string        `json:"protocol"`
+	Kernel              string        `json:"kernel"`
 	ListenIP            string        `json:"listen_ip"`
 	ServerPort          int           `json:"server_port"`
 	TransportProtocol   string        `json:"transport_protocol"`
@@ -120,46 +122,55 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		return nil, fmt.Errorf("decode node params: %w", err)
 	}
 	common.Protocol = strings.ToLower(strings.TrimSpace(common.Protocol))
-	if common.Protocol != "mieru" {
-		return nil, fmt.Errorf("unsupported protocol: %s", common.Protocol)
+	if common.Protocol == "" {
+		return nil, fmt.Errorf("node protocol is empty")
+	}
+	common.Kernel = strings.ToLower(strings.TrimSpace(common.Kernel))
+	if common.Kernel == "" && common.Protocol == "mieru" {
+		common.Kernel = "mieru"
+	}
+	if common.Kernel == "" {
+		return nil, fmt.Errorf("node kernel is empty for protocol %s", common.Protocol)
 	}
 	if common.ServerPort < 1 || common.ServerPort > 65535 {
-		return nil, fmt.Errorf("invalid Mieru server port: %d", common.ServerPort)
+		return nil, fmt.Errorf("invalid server port: %d", common.ServerPort)
 	}
 	common.ListenIP = strings.TrimSpace(common.ListenIP)
 	if common.ListenIP == "" {
 		common.ListenIP = "0.0.0.0"
 	}
 	if net.ParseIP(common.ListenIP) == nil {
-		return nil, fmt.Errorf("invalid Mieru listen IP: %s", common.ListenIP)
+		return nil, fmt.Errorf("invalid listen IP: %s", common.ListenIP)
 	}
-	if common.TransportProtocol == "" {
-		common.TransportProtocol = "TCP"
-	}
-	common.TransportProtocol = strings.ToUpper(common.TransportProtocol)
-	if common.TransportProtocol != "TCP" && common.TransportProtocol != "UDP" {
-		return nil, fmt.Errorf("invalid Mieru transport protocol: %s", common.TransportProtocol)
-	}
-	for i := range common.PortBindings {
-		binding := &common.PortBindings[i]
-		binding.Port = strings.TrimSpace(binding.Port)
-		binding.ServerPort = strings.TrimSpace(binding.ServerPort)
-		binding.Protocol = strings.ToUpper(strings.TrimSpace(binding.Protocol))
-		if binding.ServerPort == "" {
-			binding.ServerPort = binding.Port
+	if common.Protocol == "mieru" {
+		if common.TransportProtocol == "" {
+			common.TransportProtocol = "TCP"
 		}
-		if binding.Port == "" || binding.ServerPort == "" {
-			return nil, fmt.Errorf("Mieru port binding %d is empty", i)
+		common.TransportProtocol = strings.ToUpper(common.TransportProtocol)
+		if common.TransportProtocol != "TCP" && common.TransportProtocol != "UDP" {
+			return nil, fmt.Errorf("invalid Mieru transport protocol: %s", common.TransportProtocol)
 		}
-		if binding.Protocol != "TCP" && binding.Protocol != "UDP" {
-			return nil, fmt.Errorf("invalid Mieru port binding protocol: %s", binding.Protocol)
+		for i := range common.PortBindings {
+			binding := &common.PortBindings[i]
+			binding.Port = strings.TrimSpace(binding.Port)
+			binding.ServerPort = strings.TrimSpace(binding.ServerPort)
+			binding.Protocol = strings.ToUpper(strings.TrimSpace(binding.Protocol))
+			if binding.ServerPort == "" {
+				binding.ServerPort = binding.Port
+			}
+			if binding.Port == "" || binding.ServerPort == "" {
+				return nil, fmt.Errorf("Mieru port binding %d is empty", i)
+			}
+			if binding.Protocol != "TCP" && binding.Protocol != "UDP" {
+				return nil, fmt.Errorf("invalid Mieru port binding protocol: %s", binding.Protocol)
+			}
 		}
-	}
-	if common.MTU == 0 {
-		common.MTU = 1400
-	}
-	if common.UserNamePrefix == "" {
-		common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
+		if common.MTU == 0 {
+			common.MTU = 1400
+		}
+		if common.UserNamePrefix == "" {
+			common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
+		}
 	}
 	if common.BaseConfig == nil {
 		common.BaseConfig = &BaseConfig{PushInterval: 60, PullInterval: 60}
@@ -181,6 +192,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	return &NodeInfo{
 		Id:           c.NodeId,
 		Type:         common.Protocol,
+		Kernel:       common.Kernel,
 		Security:     common.Tls,
 		PushInterval: pushInterval,
 		PullInterval: pullInterval,

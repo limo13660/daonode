@@ -2,11 +2,19 @@ package core
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/conf"
+	"github.com/limo13660/daonode/core/contract"
+	"github.com/limo13660/daonode/core/mieru"
 )
+
+// ErrRuntimeStopTimeout is kept at the root package for callers that do not
+// need to know which kernel produced the lifecycle error.
+var ErrRuntimeStopTimeout = contract.ErrRuntimeStopTimeout
 
 type AddUsersParams struct {
 	Tag   string
@@ -14,14 +22,21 @@ type AddUsersParams struct {
 	*panel.NodeInfo
 }
 
-type protocolRuntime interface {
-	Start() error
-	Stop() error
-	AddUsers([]panel.UserInfo) (int, error)
-	DelUsers([]panel.UserInfo) error
-	SyncUsers([]panel.UserInfo, []panel.UserInfo) error
-	Traffic(int) ([]panel.UserTraffic, error)
-	CommitTraffic([]panel.UserTraffic)
+type KernelCapability struct {
+	Name      string
+	Protocols []string
+}
+
+type kernelDefinition struct {
+	protocols  map[string]struct{}
+	newRuntime func(string, *panel.NodeInfo) contract.Runtime
+}
+
+var kernelDefinitions = map[string]kernelDefinition{
+	"mieru": {
+		protocols:  map[string]struct{}{"mieru": {}},
+		newRuntime: mieru.NewRuntime,
+	},
 }
 
 type V2Core struct {
@@ -29,24 +44,29 @@ type V2Core struct {
 	ReloadCh chan struct{}
 
 	mu       sync.RWMutex
-	runtimes map[string]protocolRuntime
+	runtimes map[string]contract.Runtime
 }
 
 func New(config *conf.Conf) *V2Core {
 	return &V2Core{
 		Config:   config,
-		runtimes: make(map[string]protocolRuntime),
+		runtimes: make(map[string]contract.Runtime),
 	}
 }
 
-func (v *V2Core) Start(_ []*panel.NodeInfo) error {
+func (v *V2Core) Start(nodes []*panel.NodeInfo) error {
+	for _, info := range nodes {
+		if _, _, err := normalizeNodeSelection(info); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func (v *V2Core) Close() error {
 	v.mu.Lock()
 	runtimes := v.runtimes
-	v.runtimes = make(map[string]protocolRuntime)
+	v.runtimes = make(map[string]contract.Runtime)
 	v.mu.Unlock()
 
 	var stops sync.WaitGroup
@@ -54,7 +74,7 @@ func (v *V2Core) Close() error {
 	var firstErr error
 	for tag, runtime := range runtimes {
 		stops.Add(1)
-		go func(currentTag string, currentRuntime protocolRuntime) {
+		go func(currentTag string, currentRuntime contract.Runtime) {
 			defer stops.Done()
 			if err := currentRuntime.Stop(); err != nil {
 				errMu.Lock()
@@ -77,15 +97,95 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 		return fmt.Errorf("node %s already exists", tag)
 	}
 
-	var runtime protocolRuntime
-	switch info.Type {
-	case "mieru":
-		runtime = newMieruRuntime(tag, info)
-	default:
-		return fmt.Errorf("unsupported protocol: %s", info.Type)
+	kernel, _, err := normalizeNodeSelection(info)
+	if err != nil {
+		return err
 	}
+	runtime := kernelDefinitions[kernel].newRuntime(tag, info)
 	v.runtimes[tag] = runtime
 	return nil
+}
+
+// KernelCapabilities returns the protocols implemented by each compiled-in
+// kernel. Adding another core/<kernel> adapter requires registering it here.
+func KernelCapabilities() []KernelCapability {
+	capabilities := make([]KernelCapability, 0, len(kernelDefinitions))
+	for name, definition := range kernelDefinitions {
+		protocols := make([]string, 0, len(definition.protocols))
+		for protocol := range definition.protocols {
+			protocols = append(protocols, protocol)
+		}
+		sort.Strings(protocols)
+		capabilities = append(capabilities, KernelCapability{Name: name, Protocols: protocols})
+	}
+	sort.Slice(capabilities, func(i, j int) bool {
+		return capabilities[i].Name < capabilities[j].Name
+	})
+	return capabilities
+}
+
+// Supports reports whether a compiled-in kernel implements a protocol.
+func Supports(kernel, protocol string) bool {
+	kernel = strings.ToLower(strings.TrimSpace(kernel))
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	definition, ok := kernelDefinitions[kernel]
+	if !ok {
+		return false
+	}
+	_, ok = definition.protocols[protocol]
+	return ok
+}
+
+func normalizeNodeSelection(info *panel.NodeInfo) (string, string, error) {
+	if info == nil {
+		return "", "", fmt.Errorf("node info is nil")
+	}
+	protocol := strings.ToLower(strings.TrimSpace(info.Type))
+	kernel := strings.ToLower(strings.TrimSpace(info.Kernel))
+	if info.Common != nil {
+		if protocol == "" {
+			protocol = strings.ToLower(strings.TrimSpace(info.Common.Protocol))
+		}
+		if kernel == "" {
+			kernel = strings.ToLower(strings.TrimSpace(info.Common.Kernel))
+		}
+	}
+	if protocol == "" {
+		return "", "", fmt.Errorf("node protocol is empty")
+	}
+	if kernel == "" {
+		kernel = defaultKernel(protocol)
+	}
+	if kernel == "" {
+		return "", "", fmt.Errorf("node kernel is empty for protocol %s", protocol)
+	}
+	if _, ok := kernelDefinitions[kernel]; !ok {
+		return "", "", fmt.Errorf("unsupported kernel: %s", kernel)
+	}
+	if !Supports(kernel, protocol) {
+		return "", "", fmt.Errorf("kernel %s does not support protocol %s", kernel, protocol)
+	}
+	info.Type = protocol
+	info.Kernel = kernel
+	if info.Common != nil {
+		info.Common.Protocol = protocol
+		info.Common.Kernel = kernel
+	}
+	return kernel, protocol, nil
+}
+
+func defaultKernel(protocol string) string {
+	match := ""
+	for name, definition := range kernelDefinitions {
+		if _, ok := definition.protocols[protocol]; !ok {
+			continue
+		}
+		if match != "" {
+			return ""
+		}
+		match = name
+	}
+	return match
 }
 
 func (v *V2Core) DelNode(tag string) error {
