@@ -154,9 +154,6 @@ func normalizeNodeSelection(info *panel.NodeInfo) (string, string, error) {
 		return "", "", fmt.Errorf("node protocol is empty")
 	}
 	if kernel == "" {
-		kernel = defaultKernel(protocol)
-	}
-	if kernel == "" {
 		return "", "", fmt.Errorf("node kernel is empty for protocol %s", protocol)
 	}
 	if _, ok := kernelDefinitions[kernel]; !ok {
@@ -172,20 +169,6 @@ func normalizeNodeSelection(info *panel.NodeInfo) (string, string, error) {
 		info.Common.Kernel = kernel
 	}
 	return kernel, protocol, nil
-}
-
-func defaultKernel(protocol string) string {
-	match := ""
-	for name, definition := range kernelDefinitions {
-		if _, ok := definition.protocols[protocol]; !ok {
-			continue
-		}
-		if match != "" {
-			return ""
-		}
-		match = name
-	}
-	return match
 }
 
 func (v *V2Core) DelNode(tag string) error {

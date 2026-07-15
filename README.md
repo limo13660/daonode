@@ -99,7 +99,7 @@ github.com/enfein/mieru/v3/pkg/metrics
 
 ## 多内核约定
 
-面板配置同时下发 `protocol` 和 `kernel`。`core/core.go` 会先检查所选内核是否明确支持该协议，再创建运行时；旧面板未下发 `kernel` 时，Mieru 协议会兼容默认到 `mieru` 内核。
+面板配置必须同时下发 `protocol` 和 `kernel`。`core/core.go` 会先检查所选内核是否明确支持该协议，再创建运行时；未下发 `kernel`、内核不存在或协议不受支持时，节点会拒绝启动或重载，不再为旧配置自动选择 Mieru。
 
 每个新内核必须放在独立的 `core/<kernel>/` 目录，实现 `core/contract.Runtime`，并在根内核能力表中登记其支持的协议。不要只增加面板下拉选项；面板能力表、保存校验、配置下发、后端适配和测试必须一起完成。
 

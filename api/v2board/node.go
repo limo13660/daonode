@@ -126,9 +126,6 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		return nil, fmt.Errorf("node protocol is empty")
 	}
 	common.Kernel = strings.ToLower(strings.TrimSpace(common.Kernel))
-	if common.Kernel == "" && common.Protocol == "mieru" {
-		common.Kernel = "mieru"
-	}
 	if common.Kernel == "" {
 		return nil, fmt.Errorf("node kernel is empty for protocol %s", common.Protocol)
 	}
