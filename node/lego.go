@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -12,10 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-acme/lego/v4/certcrypto"
 	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/challenge/http01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/providers/dns"
@@ -30,11 +33,20 @@ type Lego struct {
 	config *panel.CertInfo
 }
 
+var (
+	dnsEnvironmentMu sync.Mutex
+	httpChallengeMu  sync.Mutex
+)
+
 func NewLego(config *panel.CertInfo) (*Lego, error) {
 	if config == nil {
 		return nil, fmt.Errorf("certificate config is nil")
 	}
-	userPath := filepath.Join(filepath.Dir(config.CertFile), "user", fmt.Sprintf("user-%s.json", config.Email))
+	if config.Email == "" || config.CertDomain == "" {
+		return nil, fmt.Errorf("ACME email or certificate domain is empty")
+	}
+	certPath := expandCertificatePath(config.CertFile, config.CertDomain, config.Email)
+	userPath := filepath.Join(filepath.Dir(certPath), "user", "user-"+acmeAccountID(config.Email)+".json")
 	user, err := newLegoUser(userPath, config.Email)
 	if err != nil {
 		return nil, fmt.Errorf("create ACME user: %w", err)
@@ -55,14 +67,9 @@ func NewLego(config *panel.CertInfo) (*Lego, error) {
 func (l *Lego) setProvider() error {
 	switch l.config.CertMode {
 	case "http":
-		return l.client.Challenge.SetHTTP01Provider(http01.NewProviderServer("", "80"))
+		return l.client.Challenge.SetHTTP01Provider(http01.NewProviderServer("", ""))
 	case "dns":
-		for key, value := range l.config.DNSEnv {
-			if err := os.Setenv(key, value); err != nil {
-				return err
-			}
-		}
-		provider, err := dns.NewDNSChallengeProviderByName(l.config.Provider)
+		provider, err := newDNSChallengeProvider(l.config.Provider, l.config.DNSEnv)
 		if err != nil {
 			return err
 		}
@@ -73,6 +80,8 @@ func (l *Lego) setProvider() error {
 }
 
 func (l *Lego) CreateCert() error {
+	unlock := l.lockHTTPChallenge()
+	defer unlock()
 	resource, err := l.client.Certificate.Obtain(certificate.ObtainRequest{
 		Domains: []string{l.config.CertDomain},
 		Bundle:  true,
@@ -84,7 +93,7 @@ func (l *Lego) CreateCert() error {
 }
 
 func (l *Lego) RenewCert() error {
-	data, err := os.ReadFile(l.config.CertFile)
+	data, err := os.ReadFile(l.expandPath(l.config.CertFile))
 	if err != nil {
 		return err
 	}
@@ -92,6 +101,8 @@ func (l *Lego) RenewCert() error {
 	if err != nil || !shouldRenew {
 		return err
 	}
+	unlock := l.lockHTTPChallenge()
+	defer unlock()
 	resource, err := l.client.Certificate.Renew(certificate.Resource{
 		Domain:      l.config.CertDomain,
 		Certificate: data,
@@ -118,8 +129,54 @@ func (l *Lego) writeCert(resource *certificate.Resource) error {
 }
 
 func (l *Lego) expandPath(path string) string {
-	replacer := strings.NewReplacer("{domain}", l.config.CertDomain, "{email}", l.config.Email)
+	return expandCertificatePath(path, l.config.CertDomain, l.config.Email)
+}
+
+func (l *Lego) lockHTTPChallenge() func() {
+	if l.config.CertMode != "http" {
+		return func() {}
+	}
+	httpChallengeMu.Lock()
+	return httpChallengeMu.Unlock
+}
+
+func expandCertificatePath(path, domain, email string) string {
+	replacer := strings.NewReplacer("{domain}", domain, "{email}", email)
 	return replacer.Replace(path)
+}
+
+func acmeAccountID(email string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return fmt.Sprintf("%x", digest[:8])
+}
+
+func newDNSChallengeProvider(providerName string, variables map[string]string) (challenge.Provider, error) {
+	dnsEnvironmentMu.Lock()
+	defer dnsEnvironmentMu.Unlock()
+
+	previous := make(map[string]*string, len(variables))
+	for key, value := range variables {
+		if current, exists := os.LookupEnv(key); exists {
+			currentCopy := current
+			previous[key] = &currentCopy
+		} else {
+			previous[key] = nil
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return nil, err
+		}
+	}
+	defer func() {
+		for key, value := range previous {
+			if value == nil {
+				_ = os.Unsetenv(key)
+				continue
+			}
+			_ = os.Setenv(key, *value)
+		}
+	}()
+
+	return dns.NewDNSChallengeProviderByName(providerName)
 }
 
 func writeManagedFile(path string, data []byte, mode os.FileMode) error {

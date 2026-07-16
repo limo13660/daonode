@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/mail"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
 )
 
 const (
@@ -74,6 +78,7 @@ type TlsSettings struct {
 	CertMode         string   `json:"cert_mode"`
 	CertFile         string   `json:"cert_file"`
 	KeyFile          string   `json:"key_file"`
+	Email            string   `json:"email"`
 	Provider         string   `json:"provider"`
 	DNSEnv           string   `json:"dns_env"`
 	RejectUnknownSni string   `json:"reject_unknown_sni"`
@@ -199,7 +204,10 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	if common.BaseConfig == nil {
 		common.BaseConfig = &BaseConfig{PushInterval: 60, PullInterval: 60}
 	}
-	common.CertInfo = buildCertInfo(c.NodeId, common.Protocol, common.TlsSettings)
+	common.CertInfo, err = buildCertInfo(c.NodeId, common.Protocol, common.TlsSettings)
+	if err != nil {
+		return nil, fmt.Errorf("invalid certificate settings: %w", err)
+	}
 
 	pushInterval, err := intervalToTime(common.BaseConfig.PushInterval)
 	if err != nil {
@@ -225,39 +233,144 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	}, nil
 }
 
-func buildCertInfo(nodeID int, protocol string, settings TlsSettings) *CertInfo {
-	certFile := settings.CertFile
+func buildCertInfo(nodeID int, protocol string, settings TlsSettings) (*CertInfo, error) {
+	certMode := strings.ToLower(strings.TrimSpace(settings.CertMode))
+	certFile := strings.TrimSpace(settings.CertFile)
 	if certFile == "" {
 		certFile = filepath.Join("/etc/daonode", protocol+strconv.Itoa(nodeID)+".cer")
 	}
-	keyFile := settings.KeyFile
+	keyFile := strings.TrimSpace(settings.KeyFile)
 	if keyFile == "" {
 		keyFile = filepath.Join("/etc/daonode", protocol+strconv.Itoa(nodeID)+".key")
 	}
-	dnsEnv := make(map[string]string)
-	for _, item := range strings.Split(settings.DNSEnv, ",") {
-		parts := strings.SplitN(item, "=", 2)
-		if len(parts) == 2 {
-			dnsEnv[parts[0]] = parts[1]
+
+	certDomain := strings.TrimSpace(settings.PrimaryServerName())
+	var (
+		email  string
+		dnsEnv map[string]string
+		err    error
+	)
+	if certMode == "http" || certMode == "dns" {
+		certDomain, err = normalizeACMEDomain(certDomain)
+		if err != nil {
+			return nil, err
+		}
+		email, err = normalizeACMEEmail(settings.Email, certDomain)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if certMode == "dns" {
+		if strings.TrimSpace(settings.Provider) == "" {
+			return nil, fmt.Errorf("DNS certificate mode requires a provider")
+		}
+		dnsEnv, err = parseDNSEnv(settings.DNSEnv)
+		if err != nil {
+			return nil, err
+		}
+		if len(dnsEnv) == 0 {
+			return nil, fmt.Errorf("DNS certificate mode requires DNS environment variables")
 		}
 	}
 	return &CertInfo{
-		CertMode:         settings.CertMode,
+		CertMode:         certMode,
 		CertFile:         certFile,
 		KeyFile:          keyFile,
-		Email:            "node@daonode.local",
-		CertDomain:       settings.PrimaryServerName(),
+		Email:            email,
+		CertDomain:       certDomain,
 		DNSEnv:           dnsEnv,
-		Provider:         settings.Provider,
+		Provider:         strings.TrimSpace(settings.Provider),
 		RejectUnknownSni: settings.RejectUnknownSni == "1",
-	}
+	}, nil
 }
 
 func (t TlsSettings) PrimaryServerName() string {
-	if len(t.ServerNames) > 0 {
-		return t.ServerNames[0]
+	for _, serverName := range t.ServerNames {
+		if serverName = strings.TrimSpace(serverName); serverName != "" {
+			return serverName
+		}
 	}
-	return t.ServerName
+	return strings.TrimSpace(t.ServerName)
+}
+
+func normalizeACMEEmail(value, certDomain string) (string, error) {
+	email := strings.TrimSpace(value)
+	if email == "" {
+		email = "acme@" + certDomain
+	}
+	address, err := mail.ParseAddress(email)
+	if err != nil || !strings.EqualFold(address.Address, email) {
+		return "", fmt.Errorf("ACME email is invalid")
+	}
+	at := strings.LastIndexByte(address.Address, '@')
+	if at <= 0 || at == len(address.Address)-1 {
+		return "", fmt.Errorf("ACME email is invalid")
+	}
+	domain, err := normalizeACMEDomain(address.Address[at+1:])
+	if err != nil {
+		return "", fmt.Errorf("ACME email domain: %w", err)
+	}
+	return strings.ToLower(address.Address[:at]) + "@" + domain, nil
+}
+
+func normalizeACMEDomain(value string) (string, error) {
+	domain := strings.TrimSuffix(strings.TrimSpace(value), ".")
+	if domain == "" || net.ParseIP(domain) != nil {
+		return "", fmt.Errorf("ACME requires a public DNS name, not an IP address")
+	}
+	ascii, err := idna.Lookup.ToASCII(domain)
+	if err != nil {
+		return "", fmt.Errorf("invalid ACME domain: %w", err)
+	}
+	ascii = strings.ToLower(strings.TrimSuffix(ascii, "."))
+	if len(ascii) == 0 || len(ascii) > 253 {
+		return "", fmt.Errorf("invalid ACME domain")
+	}
+	for _, label := range strings.Split(ascii, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("invalid ACME domain")
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return "", fmt.Errorf("invalid ACME domain")
+			}
+		}
+	}
+	publicSuffix, isICANN := publicsuffix.PublicSuffix(ascii)
+	if !isICANN || publicSuffix == ascii {
+		return "", fmt.Errorf("ACME domain must end with a valid public suffix")
+	}
+	return ascii, nil
+}
+
+func parseDNSEnv(value string) (map[string]string, error) {
+	variables := make(map[string]string)
+	for _, item := range strings.FieldsFunc(value, func(char rune) bool {
+		return char == ',' || char == '\n' || char == '\r'
+	}) {
+		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+		if len(parts) != 2 || !isEnvironmentVariableName(parts[0]) {
+			return nil, fmt.Errorf("invalid DNS environment variable %q; use NAME=value", item)
+		}
+		variables[parts[0]] = parts[1]
+	}
+	return variables, nil
+}
+
+func isEnvironmentVariableName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, char := range value {
+		if (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') || char == '_' {
+			continue
+		}
+		if index > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func intervalToTime(value any) (time.Duration, error) {
