@@ -298,20 +298,57 @@ download_release() {
     local url="$1"
     local destination="$2"
     local partial="${destination}.part"
+    local source
+    local downloaded=0
+    local curl_args=(
+        -fL
+        --retry 0
+        --connect-timeout 15
+        --max-time 300
+        --speed-limit 1024
+        --speed-time 60
+        --progress-bar
+    )
+    local mirrors=(
+        "https://gh-proxy.com/${url}"
+        "https://ghproxy.net/${url}"
+    )
+    local sources=()
 
     rm -f "$partial"
+    if [[ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]]; then
+        sources=("$url" "${mirrors[@]}")
+    else
+        sources=("${mirrors[@]}" "$url")
+    fi
     echo -e "${yellow}安装包约 24 MiB，低速网络可能需要数分钟；下载最长等待 30 分钟。${plain}"
-    if ! curl -fL \
-        --retry 2 \
-        --retry-delay 2 \
-        --retry-max-time 1800 \
-        --connect-timeout 15 \
-        --max-time 1800 \
-        --speed-limit 1024 \
-        --speed-time 60 \
-        --progress-bar \
-        -o "$partial" \
-        "$url"; then
+    echo "Each source attempt has a 5-minute timeout. Failed sources switch automatically and resume the partial download."
+    for source in "${sources[@]}"; do
+        echo "Download source: $source"
+        if [[ -s "$partial" ]]; then
+            if curl "${curl_args[@]}" --continue-at - -o "$partial" "$source"; then
+                if unzip -tq "$partial" >/dev/null 2>&1; then
+                    downloaded=1
+                    break
+                fi
+                echo "Resumed data is not a valid release archive; retrying this source from the beginning."
+            else
+                echo "Resume failed; retrying this source from the beginning."
+            fi
+            rm -f "$partial"
+        fi
+        if curl "${curl_args[@]}" -o "$partial" "$source"; then
+            if unzip -tq "$partial" >/dev/null 2>&1; then
+                downloaded=1
+                break
+            fi
+            echo "Downloaded data is not a valid release archive."
+            rm -f "$partial"
+        else
+            echo "Download source failed; keeping partial data for the next source."
+        fi
+    done
+    if [[ $downloaded -ne 1 ]]; then
         rm -f "$partial"
         return 1
     fi

@@ -10,6 +10,7 @@ import (
 	"github.com/limo13660/daonode/conf"
 	"github.com/limo13660/daonode/core/contract"
 	"github.com/limo13660/daonode/core/mieru"
+	coreSingBox "github.com/limo13660/daonode/core/singbox"
 )
 
 // ErrRuntimeStopTimeout is kept at the root package for callers that do not
@@ -36,6 +37,10 @@ var kernelDefinitions = map[string]kernelDefinition{
 	"mieru": {
 		protocols:  map[string]struct{}{"mieru": {}},
 		newRuntime: mieru.NewRuntime,
+	},
+	"singbox": {
+		protocols:  map[string]struct{}{"naive": {}},
+		newRuntime: coreSingBox.NewRuntime,
 	},
 }
 

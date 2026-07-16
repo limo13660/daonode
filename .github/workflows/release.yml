@@ -33,7 +33,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Run tests
-        run: go test ./...
+        run: go test -tags with_quic ./...
 
   build:
     needs: test
@@ -115,13 +115,13 @@ jobs:
         run: |
           echo "version: $version"
           mkdir -p build_assets
-          GOEXPERIMENT=jsonv2 go build -v -o build_assets/daonode -trimpath -ldflags "-X 'github.com/limo13660/daonode/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 go build -tags with_quic -v -o build_assets/daonode -trimpath -ldflags "-X 'github.com/limo13660/daonode/cmd.version=$version' -s -w -buildid="
 
       - name: Build Mips softfloat daonode
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
         run: |
           echo "version: $version"
-          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/daonode_softfloat -trimpath -ldflags "-X 'github.com/limo13660/daonode/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -tags with_quic -v -o build_assets/daonode_softfloat -trimpath -ldflags "-X 'github.com/limo13660/daonode/cmd.version=$version' -s -w -buildid="
       - name: Prepare to release
         run: |
           cp ${GITHUB_WORKSPACE}/README.md ./build_assets/README.md

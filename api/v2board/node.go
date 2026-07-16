@@ -32,21 +32,27 @@ type NodeInfo struct {
 }
 
 type CommonNode struct {
-	Protocol            string        `json:"protocol"`
-	Kernel              string        `json:"kernel"`
-	ListenIP            string        `json:"listen_ip"`
-	ServerPort          int           `json:"server_port"`
-	TransportProtocol   string        `json:"transport_protocol"`
-	PortBindings        []PortBinding `json:"port_bindings"`
-	MTU                 int           `json:"mtu"`
-	TrafficPattern      string        `json:"traffic_pattern"`
-	UserHintIsMandatory bool          `json:"user_hint_is_mandatory"`
-	UserNamePrefix      string        `json:"username_prefix"`
-	Routes              []Route       `json:"routes"`
-	BaseConfig          *BaseConfig   `json:"base_config"`
-	Tls                 int           `json:"tls"`
-	TlsSettings         TlsSettings   `json:"tls_settings"`
-	CertInfo            *CertInfo     `json:"-"`
+	Protocol            string           `json:"protocol"`
+	Kernel              string           `json:"kernel"`
+	ListenIP            string           `json:"listen_ip"`
+	ServerPort          int              `json:"server_port"`
+	TransportProtocol   string           `json:"transport_protocol"`
+	PortBindings        []PortBinding    `json:"port_bindings"`
+	MTU                 int              `json:"mtu"`
+	TrafficPattern      string           `json:"traffic_pattern"`
+	UserHintIsMandatory bool             `json:"user_hint_is_mandatory"`
+	UserNamePrefix      string           `json:"username_prefix"`
+	ProtocolSettings    ProtocolSettings `json:"protocol_settings"`
+	Routes              []Route          `json:"routes"`
+	BaseConfig          *BaseConfig      `json:"base_config"`
+	Tls                 int              `json:"tls"`
+	TlsSettings         TlsSettings      `json:"tls_settings"`
+	CertInfo            *CertInfo        `json:"-"`
+}
+
+type ProtocolSettings struct {
+	QUICCongestionControl string `json:"quic_congestion_control"`
+	UDPOverTCP            bool   `json:"udp_over_tcp"`
 }
 
 type PortBinding struct {
@@ -164,6 +170,27 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		}
 		if common.MTU == 0 {
 			common.MTU = 1400
+		}
+		if common.UserNamePrefix == "" {
+			common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
+		}
+	}
+	if common.Protocol == "naive" {
+		if common.TransportProtocol == "" {
+			common.TransportProtocol = "TCP"
+		}
+		common.TransportProtocol = strings.ToUpper(common.TransportProtocol)
+		if common.TransportProtocol != "TCP" && common.TransportProtocol != "UDP" {
+			return nil, fmt.Errorf("invalid NaiveProxy transport protocol: %s", common.TransportProtocol)
+		}
+		if common.Tls != Tls {
+			return nil, fmt.Errorf("NaiveProxy requires TLS")
+		}
+		if common.TlsSettings.PrimaryServerName() == "" {
+			return nil, fmt.Errorf("NaiveProxy TLS server name is empty")
+		}
+		if common.TlsSettings.CertMode == "" || common.TlsSettings.CertMode == "none" {
+			return nil, fmt.Errorf("NaiveProxy certificate mode is empty")
 		}
 		if common.UserNamePrefix == "" {
 			common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)

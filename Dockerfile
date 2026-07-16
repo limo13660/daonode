@@ -4,7 +4,7 @@ WORKDIR /app
 COPY . .
 ENV CGO_ENABLED=0
 RUN GOEXPERIMENT=jsonv2 go mod download
-RUN GOEXPERIMENT=jsonv2 go build -v -o daonode
+RUN GOEXPERIMENT=jsonv2 go build -tags with_quic -v -o daonode
 
 # Release
 FROM  alpine
