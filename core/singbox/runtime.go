@@ -211,11 +211,21 @@ func (r *runtime) buildInstanceLocked() (*singbox.Box, context.CancelFunc, error
 	if value := strings.TrimSpace(common.ProtocolSettings.QUICCongestionControl); value != "" {
 		inbound["quic_congestion_control"] = value
 	}
+	routeConfig, dnsConfig, err := buildRouteConfig(common.Routes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure NaiveProxy routes: %w", err)
+	}
 	config := map[string]any{
-		"log":       map[string]any{"disabled": true},
-		"inbounds":  []any{inbound},
-		"outbounds": []any{map[string]any{"type": "direct", "tag": "direct"}},
-		"route":     map[string]any{"final": "direct"},
+		"log":      map[string]any{"disabled": true},
+		"inbounds": []any{inbound},
+		"outbounds": []any{
+			map[string]any{"type": "direct", "tag": "direct"},
+			map[string]any{"type": "block", "tag": "block"},
+		},
+		"route": routeConfig,
+	}
+	if dnsConfig != nil {
+		config["dns"] = dnsConfig
 	}
 	content, err := json.Marshal(config)
 	if err != nil {
