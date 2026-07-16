@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/limo13660/daonode/conf"
 	"github.com/limo13660/daonode/core"
@@ -22,6 +23,8 @@ var (
 	config string
 	watch  bool
 )
+
+const startupRetryInterval = 10 * time.Second
 
 var serverCommand = cobra.Command{
 	Use:   "server",
@@ -64,25 +67,16 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 
 	limiter.Init()
-	nodes, err := node.New(c.NodeConfigs)
-	if err != nil {
-		log.WithField("err", err).Error("Get node info failed")
+	reloadCh := make(chan struct{}, 1)
+	osSignals := make(chan os.Signal, 1)
+	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(osSignals)
+
+	nodes, runtimeCore, started := startRuntimeWithRetry(c, reloadCh, osSignals)
+	if !started {
 		return
 	}
 	log.Info("Got nodes info from server")
-
-	reloadCh := make(chan struct{}, 1)
-	runtimeCore := core.New(c)
-	runtimeCore.ReloadCh = reloadCh
-	if err := runtimeCore.Start(nodes.NodeInfos); err != nil {
-		log.WithField("err", err).Error("Start core failed")
-		return
-	}
-	if err := nodes.Start(c.NodeConfigs, runtimeCore); err != nil {
-		_ = runtimeCore.Close()
-		log.WithField("err", err).Error("Run nodes failed")
-		return
-	}
 	log.Info("Nodes started")
 	defer func() {
 		if nodes != nil {
@@ -110,10 +104,6 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 	runtime.GC()
 
-	osSignals := make(chan os.Signal, 1)
-	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(osSignals)
-
 	for {
 		select {
 		case <-osSignals:
@@ -126,6 +116,43 @@ func serverHandle(_ *cobra.Command, _ []string) {
 				return
 			}
 			log.Info("Reload completed")
+		}
+	}
+}
+
+func startRuntimeWithRetry(
+	c *conf.Conf,
+	reloadCh chan struct{},
+	osSignals <-chan os.Signal,
+) (*node.Node, *core.V2Core, bool) {
+	for {
+		nodes, err := node.New(c.NodeConfigs)
+		if err == nil {
+			runtimeCore := core.New(c)
+			runtimeCore.ReloadCh = reloadCh
+			if err = runtimeCore.Start(nodes.NodeInfos); err == nil {
+				if err = nodes.Start(c.NodeConfigs, runtimeCore); err == nil {
+					return nodes, runtimeCore, true
+				}
+				_ = nodes.Close()
+			}
+			_ = runtimeCore.Close()
+		}
+
+		log.WithFields(log.Fields{
+			"err":      err,
+			"retry_in": startupRetryInterval,
+		}).Error("Start daonode runtime failed; waiting for a valid panel configuration")
+
+		timer := time.NewTimer(startupRetryInterval)
+		select {
+		case <-osSignals:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			log.Info("Received exit signal while waiting to retry startup")
+			return nil, nil, false
+		case <-timer.C:
 		}
 	}
 }

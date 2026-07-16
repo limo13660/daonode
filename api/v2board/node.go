@@ -386,8 +386,17 @@ func normalizeACMEDomain(value string) (string, error) {
 		}
 	}
 	publicSuffix, isICANN := publicsuffix.PublicSuffix(ascii)
-	if !isICANN || publicSuffix == ascii {
-		return "", fmt.Errorf("ACME domain must end with a valid public suffix")
+	// The public suffix list also contains explicitly registered private
+	// suffixes such as pages.dev and github.io. They are valid ACME targets
+	// when the concrete hostname points to this server, even though the PSL
+	// marks the suffix as private instead of ICANN-managed. Unknown/special
+	// use suffixes fall back to a single-label rule and remain rejected.
+	recognizedPrivateSuffix := !isICANN && strings.Contains(publicSuffix, ".")
+	if publicSuffix == ascii || (!isICANN && !recognizedPrivateSuffix) {
+		return "", fmt.Errorf(
+			"ACME domain %q must contain a registrable name under a recognized public suffix",
+			ascii,
+		)
 	}
 	return ascii, nil
 }
