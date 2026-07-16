@@ -82,6 +82,12 @@ type TlsSettings struct {
 	Provider         string   `json:"provider"`
 	DNSEnv           string   `json:"dns_env"`
 	RejectUnknownSni string   `json:"reject_unknown_sni"`
+	AllowInsecure    string   `json:"allow_insecure"`
+	Fingerprint      string   `json:"fingerprint"`
+	ECH              string   `json:"ech"`
+	ECHServerName    string   `json:"ech_server_name"`
+	ECHKey           string   `json:"ech_key"`
+	ECHConfig        any      `json:"ech_config"`
 }
 
 type CertInfo struct {

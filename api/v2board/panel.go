@@ -36,7 +36,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		retryCount = *c.RetryCount
 	}
 	client.SetRetryCount(retryCount)
-	client.SetHeader("User-Agent", fmt.Sprintf("daonode go-resty/%s (https://github.com/go-resty/resty)", resty.Version))
+	client.SetHeader("User-Agent", "DaoNode")
 	if c.Timeout > 0 {
 		client.SetTimeout(time.Duration(c.Timeout) * time.Second)
 	} else {

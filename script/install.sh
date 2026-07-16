@@ -309,20 +309,11 @@ download_release() {
         --speed-time 60
         --progress-bar
     )
-    local mirrors=(
-        "https://gh-proxy.com/${url}"
-        "https://ghproxy.net/${url}"
-    )
-    local sources=()
+    local sources=("$url")
 
     rm -f "$partial"
-    if [[ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${http_proxy:-}" ]]; then
-        sources=("$url" "${mirrors[@]}")
-    else
-        sources=("${mirrors[@]}" "$url")
-    fi
     echo -e "${yellow}安装包约 24 MiB，低速网络可能需要数分钟；下载最长等待 30 分钟。${plain}"
-    echo "Each source attempt has a 5-minute timeout. Failed sources switch automatically and resume the partial download."
+    echo "Download timeout is 5 minutes; partial downloads resume automatically."
     for source in "${sources[@]}"; do
         echo "Download source: $source"
         if [[ -s "$partial" ]]; then
@@ -345,7 +336,7 @@ download_release() {
             echo "Downloaded data is not a valid release archive."
             rm -f "$partial"
         else
-            echo "Download source failed; keeping partial data for the next source."
+            echo "Download source failed."
         fi
     done
     if [[ $downloaded -ne 1 ]]; then
