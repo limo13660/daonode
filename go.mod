@@ -1,6 +1,6 @@
 module github.com/limo13660/daonode
 
-go 1.26.1
+go 1.26.1 
 
 require (
 	github.com/enfein/mieru/v3 v3.34.1
