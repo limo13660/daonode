@@ -2,7 +2,9 @@ package singbox
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"maps"
@@ -23,6 +25,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	panel "github.com/limo13660/daonode/api/v2board"
+	"github.com/limo13660/daonode/common/rate"
 	"github.com/limo13660/daonode/core/contract"
 	"github.com/limo13660/daonode/core/shared"
 )
@@ -207,12 +210,23 @@ func (r *runtime) buildInstanceLocked() (*singbox.Box, context.CancelFunc, error
 		"users":       users,
 	}
 	if certificateRequired {
-		inbound["tls"] = map[string]any{
+		tlsOptions := map[string]any{
 			"enabled":          true,
 			"server_name":      common.TlsSettings.PrimaryServerName(),
 			"certificate_path": cert.CertFile,
 			"key_path":         cert.KeyFile,
 		}
+		if strings.EqualFold(strings.TrimSpace(common.TlsSettings.ECH), "custom") {
+			echKey, err := normalizeECHPEM(common.TlsSettings.ECHKey, "ECH KEYS")
+			if err != nil {
+				return nil, nil, fmt.Errorf("configure NaiveProxy ECH: %w", err)
+			}
+			tlsOptions["ech"] = map[string]any{
+				"enabled": true,
+				"key":     []string{echKey},
+			}
+		}
+		inbound["tls"] = tlsOptions
 	}
 	if value := strings.TrimSpace(common.ProtocolSettings.QUICCongestionControl); value != "" {
 		inbound["quic_congestion_control"] = value
@@ -250,6 +264,24 @@ func (r *runtime) buildInstanceLocked() (*singbox.Box, context.CancelFunc, error
 	}
 	instance.Router().AppendTracker(&connectionTracker{runtime: r})
 	return instance, cancel, nil
+}
+
+func normalizeECHPEM(value, blockType string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s is empty", strings.ToLower(blockType))
+	}
+	if block, rest := pem.Decode([]byte(value)); block != nil {
+		if block.Type != blockType || strings.TrimSpace(string(rest)) != "" {
+			return "", fmt.Errorf("invalid %s PEM", strings.ToLower(blockType))
+		}
+		return value, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || len(raw) == 0 {
+		return "", fmt.Errorf("invalid base64 %s", strings.ToLower(blockType))
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: raw})), nil
 }
 
 func (r *runtime) stopLocked() error {
@@ -339,11 +371,31 @@ func (t *connectionTracker) RoutedConnection(_ context.Context, conn net.Conn, m
 	return &closeHookConn{ExtendedConn: counted, release: release}
 }
 
-func (t *connectionTracker) RoutedPacketConnection(_ context.Context, conn N.PacketConn, _ adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
-	// Naive UDP-over-TCP is intentionally not advertised until the common
-	// packet policy has the same rate/device accounting guarantees as streams.
-	_ = conn.Close()
-	return conn
+func (t *connectionTracker) RoutedPacketConnection(_ context.Context, conn N.PacketConn, metadata adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) N.PacketConn {
+	if !t.runtime.accepting.Load() || !t.runtime.info.Common.ProtocolSettings.UDPOverTCP {
+		_ = conn.Close()
+		return conn
+	}
+	user, counter, ok := t.runtime.userForName(metadata.User)
+	if !ok {
+		_ = conn.Close()
+		return conn
+	}
+	bucket, release, accepted := t.runtime.OpenPacketConnection(user, conn, metadata.Source.String(), true)
+	if !accepted {
+		_ = conn.Close()
+		return conn
+	}
+	limited := conn
+	if bucket != nil {
+		limited = rate.NewPacketConnRateLimiter(limited, bucket)
+	}
+	counted := bufio.NewCounterPacketConn(
+		limited,
+		[]N.CountFunc{func(value int64) { counter.upload.Add(value) }},
+		[]N.CountFunc{func(value int64) { counter.download.Add(value) }},
+	)
+	return &closeHookPacketConn{PacketConn: counted, release: release}
 }
 
 type closeHookConn struct {
@@ -360,4 +412,20 @@ func (c *closeHookConn) Close() error {
 
 func (c *closeHookConn) Upstream() any {
 	return c.ExtendedConn
+}
+
+type closeHookPacketConn struct {
+	N.PacketConn
+	release func()
+	once    sync.Once
+}
+
+func (c *closeHookPacketConn) Close() error {
+	err := c.PacketConn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+func (c *closeHookPacketConn) Upstream() any {
+	return c.PacketConn
 }

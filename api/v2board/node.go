@@ -96,6 +96,7 @@ type CertInfo struct {
 	KeyFile          string
 	Email            string
 	CertDomain       string
+	CertDomains      []string
 	DNSEnv           map[string]string
 	Provider         string
 	RejectUnknownSni bool
@@ -257,17 +258,27 @@ func buildCertInfo(nodeID int, protocol string, settings TlsSettings) (*CertInfo
 		keyFile = filepath.Join("/etc/daonode", protocol+strconv.Itoa(nodeID)+".key")
 	}
 
-	certDomain := strings.TrimSpace(settings.PrimaryServerName())
+	certDomains := settings.CertificateNames()
+	certDomain := ""
+	if len(certDomains) > 0 {
+		certDomain = certDomains[0]
+	}
 	var (
 		email  string
 		dnsEnv map[string]string
 		err    error
 	)
 	if certMode == "http" || certMode == "dns" {
-		certDomain, err = normalizeACMEDomain(certDomain)
-		if err != nil {
-			return nil, err
+		if len(certDomains) == 0 {
+			return nil, fmt.Errorf("ACME certificate domain is empty")
 		}
+		for index, domain := range certDomains {
+			certDomains[index], err = normalizeACMEDomain(domain)
+			if err != nil {
+				return nil, err
+			}
+		}
+		certDomain = certDomains[0]
 		email, err = normalizeACMEEmail(settings.Email, certDomain)
 		if err != nil {
 			return nil, err
@@ -291,6 +302,7 @@ func buildCertInfo(nodeID int, protocol string, settings TlsSettings) (*CertInfo
 		KeyFile:          keyFile,
 		Email:            email,
 		CertDomain:       certDomain,
+		CertDomains:      certDomains,
 		DNSEnv:           dnsEnv,
 		Provider:         strings.TrimSpace(settings.Provider),
 		RejectUnknownSni: settings.RejectUnknownSni == "1",
@@ -298,12 +310,36 @@ func buildCertInfo(nodeID int, protocol string, settings TlsSettings) (*CertInfo
 }
 
 func (t TlsSettings) PrimaryServerName() string {
+	if serverName := strings.TrimSpace(t.ServerName); serverName != "" {
+		return serverName
+	}
 	for _, serverName := range t.ServerNames {
 		if serverName = strings.TrimSpace(serverName); serverName != "" {
 			return serverName
 		}
 	}
-	return strings.TrimSpace(t.ServerName)
+	return ""
+}
+
+func (t TlsSettings) CertificateNames() []string {
+	values := make([]string, 0, len(t.ServerNames)+1)
+	values = append(values, t.ServerName)
+	values = append(values, t.ServerNames...)
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		key := strings.ToLower(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func normalizeACMEEmail(value, certDomain string) (string, error) {

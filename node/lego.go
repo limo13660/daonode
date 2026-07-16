@@ -83,7 +83,7 @@ func (l *Lego) CreateCert() error {
 	unlock := l.lockHTTPChallenge()
 	defer unlock()
 	resource, err := l.client.Certificate.Obtain(certificate.ObtainRequest{
-		Domains: []string{l.config.CertDomain},
+		Domains: l.certificateDomains(),
 		Bundle:  true,
 	})
 	if err != nil {
@@ -92,25 +92,33 @@ func (l *Lego) CreateCert() error {
 	return l.writeCert(resource)
 }
 
-func (l *Lego) RenewCert() error {
+func (l *Lego) RenewCert() (bool, error) {
 	data, err := os.ReadFile(l.expandPath(l.config.CertFile))
 	if err != nil {
-		return err
+		return false, err
 	}
 	shouldRenew, err := l.shouldRenew(data)
 	if err != nil || !shouldRenew {
-		return err
+		return false, err
+	}
+	privateKey, err := os.ReadFile(l.expandPath(l.config.KeyFile))
+	if err != nil {
+		return false, err
 	}
 	unlock := l.lockHTTPChallenge()
 	defer unlock()
 	resource, err := l.client.Certificate.Renew(certificate.Resource{
 		Domain:      l.config.CertDomain,
 		Certificate: data,
+		PrivateKey:  privateKey,
 	}, true, false, "")
 	if err != nil {
-		return err
+		return false, err
 	}
-	return l.writeCert(resource)
+	if err := l.writeCert(resource); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (l *Lego) shouldRenew(data []byte) (bool, error) {
@@ -130,6 +138,13 @@ func (l *Lego) writeCert(resource *certificate.Resource) error {
 
 func (l *Lego) expandPath(path string) string {
 	return expandCertificatePath(path, l.config.CertDomain, l.config.Email)
+}
+
+func (l *Lego) certificateDomains() []string {
+	if len(l.config.CertDomains) > 0 {
+		return l.config.CertDomains
+	}
+	return []string{l.config.CertDomain}
 }
 
 func (l *Lego) lockHTTPChallenge() func() {

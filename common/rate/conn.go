@@ -1,6 +1,12 @@
 package rate
 
-import "net"
+import (
+	"net"
+
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+)
 
 func NewConnRateLimiter(c net.Conn, l *DynamicBucket) *Conn {
 	return &Conn{
@@ -27,28 +33,34 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	return c.Conn.Write(b)
 }
 
-/*
-type PacketConnCounter struct {
-	network.PacketConn
-	limiter *ratelimit.Bucket
+type PacketConnRateLimiter struct {
+	N.PacketConn
+	limiter *DynamicBucket
 }
 
-func NewPacketConnCounter(conn network.PacketConn, l *ratelimit.Bucket) network.PacketConn {
-	return &PacketConnCounter{
+func NewPacketConnRateLimiter(conn N.PacketConn, limiter *DynamicBucket) N.PacketConn {
+	return &PacketConnRateLimiter{
 		PacketConn: conn,
-		limiter:    l,
+		limiter:    limiter,
 	}
 }
 
-func (p *PacketConnCounter) ReadPacket(buff *buf.Buffer) (destination M.Socksaddr, err error) {
-	pLen := buff.Len()
-	destination, err = p.PacketConn.ReadPacket(buff)
-	p.limiter.Wait(int64(buff.Len() - pLen))
+func (p *PacketConnRateLimiter) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
+	initialLen := buffer.Len()
+	destination, err = p.PacketConn.ReadPacket(buffer)
+	if packetLen := buffer.Len() - initialLen; packetLen > 0 {
+		p.limiter.Get().Wait(int64(packetLen))
+	}
 	return destination, err
 }
 
-func (p *PacketConnCounter) WritePacket(buff *buf.Buffer, destination M.Socksaddr) (err error) {
-	p.limiter.Wait(int64(buff.Len()))
-	return p.PacketConn.WritePacket(buff, destination)
+func (p *PacketConnRateLimiter) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	if packetLen := buffer.Len(); packetLen > 0 {
+		p.limiter.Get().Wait(int64(packetLen))
+	}
+	return p.PacketConn.WritePacket(buffer, destination)
 }
-*/
+
+func (p *PacketConnRateLimiter) Upstream() any {
+	return p.PacketConn
+}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,13 +21,35 @@ import (
 )
 
 func (c *Controller) renewCertTask(_ context.Context) error {
+	cert := c.info.Common.CertInfo
+	if cert == nil {
+		return nil
+	}
+	if cert.CertMode == "self" {
+		if selfSignedCertificateIsUsable(cert.CertDomains, cert.CertFile, cert.KeyFile) {
+			return nil
+		}
+		if err := generateSelfSignedCertificate(cert.CertDomains, cert.CertFile, cert.KeyFile); err != nil {
+			log.WithField("tag", c.tag).Info("renew self-signed cert error: ", err)
+			return nil
+		}
+		log.WithField("tag", c.tag).Info("self-signed certificate renewed, requesting runtime reload")
+		c.requestRuntimeReload()
+		return nil
+	}
 	manager, err := NewLego(c.info.Common.CertInfo)
 	if err != nil {
 		log.WithField("tag", c.tag).Info("new lego error: ", err)
 		return nil
 	}
-	if err := manager.RenewCert(); err != nil {
+	renewed, err := manager.RenewCert()
+	if err != nil {
 		log.WithField("tag", c.tag).Info("renew cert error: ", err)
+		return nil
+	}
+	if renewed {
+		log.WithField("tag", c.tag).Info("certificate renewed, requesting runtime reload")
+		c.requestRuntimeReload()
 	}
 	return nil
 }
@@ -57,10 +81,10 @@ func (c *Controller) requestCert() error {
 			return fmt.Errorf("create lego cert: %w", err)
 		}
 	case "self":
-		if file.IsExist(cert.CertFile) && file.IsExist(cert.KeyFile) {
+		if selfSignedCertificateIsUsable(cert.CertDomains, cert.CertFile, cert.KeyFile) {
 			return nil
 		}
-		if err := generateSelfSignedCertificate(cert.CertDomain, cert.CertFile, cert.KeyFile); err != nil {
+		if err := generateSelfSignedCertificate(cert.CertDomains, cert.CertFile, cert.KeyFile); err != nil {
 			return fmt.Errorf("generate self-signed cert: %w", err)
 		}
 	default:
@@ -69,8 +93,8 @@ func (c *Controller) requestCert() error {
 	return nil
 }
 
-func generateSelfSignedCertificate(domain, certPath, keyPath string) error {
-	if domain == "" {
+func generateSelfSignedCertificate(domains []string, certPath, keyPath string) error {
+	if len(domains) == 0 || domains[0] == "" {
 		return fmt.Errorf("certificate domain is empty")
 	}
 	if err := os.MkdirAll(filepath.Dir(certPath), 0755); err != nil {
@@ -85,13 +109,19 @@ func generateSelfSignedCertificate(domain, certPath, keyPath string) error {
 	}
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
-		Subject:               pkix.Name{CommonName: domain},
-		DNSNames:              []string{domain},
+		Subject:               pkix.Name{CommonName: domains[0]},
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		NotBefore:             time.Now().Add(-time.Minute),
-		NotAfter:              time.Now().AddDate(1, 0, 0),
+		NotBefore:             time.Now().Add(-5 * time.Minute),
+		NotAfter:              time.Now().Add(90 * 24 * time.Hour),
+	}
+	for _, domain := range domains {
+		if ip := net.ParseIP(domain); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		} else {
+			template.DNSNames = append(template.DNSNames, domain)
+		}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
@@ -117,4 +147,29 @@ func generateSelfSignedCertificate(domain, certPath, keyPath string) error {
 		return err
 	}
 	return keyFile.Close()
+}
+
+func selfSignedCertificateIsUsable(domains []string, certPath, keyPath string) bool {
+	if len(domains) == 0 || !file.IsExist(certPath) || !file.IsExist(keyPath) {
+		return false
+	}
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil || len(pair.Certificate) == 0 {
+		return false
+	}
+	certificate, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return false
+	}
+	if certificate.NotAfter.Sub(certificate.NotBefore) > 180*24*time.Hour ||
+		time.Until(certificate.NotAfter) <= 30*24*time.Hour ||
+		time.Now().Before(certificate.NotBefore) {
+		return false
+	}
+	for _, domain := range domains {
+		if err := certificate.VerifyHostname(domain); err != nil {
+			return false
+		}
+	}
+	return true
 }

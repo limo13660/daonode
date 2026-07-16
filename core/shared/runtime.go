@@ -6,6 +6,7 @@ package shared
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
@@ -49,7 +50,7 @@ type RuntimeServices struct {
 	mu           sync.Mutex
 	users        map[int]panel.UserInfo
 	pending      map[int]pendingTraffic
-	connections  map[int]map[net.Conn]struct{}
+	connections  map[int]map[io.Closer]struct{}
 	trafficUsers map[int]struct{}
 }
 
@@ -60,7 +61,7 @@ func NewRuntimeServices(tag string, source CounterSource) *RuntimeServices {
 		source:       source,
 		users:        make(map[int]panel.UserInfo),
 		pending:      make(map[int]pendingTraffic),
-		connections:  make(map[int]map[net.Conn]struct{}),
+		connections:  make(map[int]map[io.Closer]struct{}),
 		trafficUsers: make(map[int]struct{}),
 	}
 }
@@ -68,7 +69,7 @@ func NewRuntimeServices(tag string, source CounterSource) *RuntimeServices {
 // SyncUsers updates the users accepted by the common connection policy. It
 // must be called only after the kernel has applied the same user transaction.
 func (s *RuntimeServices) SyncUsers(deleted, added []panel.UserInfo) {
-	connections := make([]net.Conn, 0)
+	connections := make([]io.Closer, 0)
 
 	s.mu.Lock()
 	for _, user := range deleted {
@@ -95,6 +96,27 @@ func (s *RuntimeServices) SyncUsers(deleted, added []panel.UserInfo) {
 // callback is idempotent and must be called when the kernel finishes serving
 // the connection.
 func (s *RuntimeServices) OpenConnection(user panel.UserInfo, conn net.Conn, trackDevice bool) (net.Conn, func(), bool) {
+	if conn == nil {
+		return nil, nil, false
+	}
+	bucket, release, accepted := s.openSession(user, conn, remoteIP(conn.RemoteAddr()), trackDevice)
+	if !accepted {
+		return nil, nil, false
+	}
+	if bucket != nil {
+		conn = rate.NewConnRateLimiter(conn, bucket)
+	}
+	return conn, release, true
+}
+
+// OpenPacketConnection applies the same user, device and speed policy as a
+// stream connection. Packet kernels wrap the returned bucket around their
+// native PacketConn and call release when the packet session closes.
+func (s *RuntimeServices) OpenPacketConnection(user panel.UserInfo, conn io.Closer, sourceAddress string, trackDevice bool) (*rate.DynamicBucket, func(), bool) {
+	return s.openSession(user, conn, remoteIPString(sourceAddress), trackDevice)
+}
+
+func (s *RuntimeServices) openSession(user panel.UserInfo, conn io.Closer, ip string, trackDevice bool) (*rate.DynamicBucket, func(), bool) {
 	if conn == nil || !s.userIsCurrent(user) {
 		return nil, nil, false
 	}
@@ -104,7 +126,6 @@ func (s *RuntimeServices) OpenConnection(user panel.UserInfo, conn net.Conn, tra
 		return nil, nil, false
 	}
 	userTag := format.UserTag(s.tag, user.Uuid)
-	ip := remoteIP(conn.RemoteAddr())
 	bucket, reject := nodeLimiter.CheckLimit(userTag, ip, trackDevice)
 	if reject {
 		return nil, nil, false
@@ -121,7 +142,7 @@ func (s *RuntimeServices) OpenConnection(user panel.UserInfo, conn net.Conn, tra
 	}
 	connections := s.connections[user.Id]
 	if connections == nil {
-		connections = make(map[net.Conn]struct{})
+		connections = make(map[io.Closer]struct{})
 		s.connections[user.Id] = connections
 	}
 	connections[conn] = struct{}{}
@@ -143,11 +164,7 @@ func (s *RuntimeServices) OpenConnection(user panel.UserInfo, conn net.Conn, tra
 			}
 		})
 	}
-
-	if bucket != nil {
-		conn = rate.NewConnRateLimiter(conn, bucket)
-	}
-	return conn, release, true
+	return bucket, release, true
 }
 
 // CloseUserConnections closes all tracked connections for one user without
@@ -160,7 +177,7 @@ func (s *RuntimeServices) CloseUserConnections(uid int) {
 // CloseAllConnections closes all connections tracked by this runtime.
 func (s *RuntimeServices) CloseAllConnections() {
 	s.mu.Lock()
-	connections := make([]net.Conn, 0)
+	connections := make([]io.Closer, 0)
 	for uid, active := range s.connections {
 		for conn := range active {
 			connections = append(connections, conn)
@@ -241,11 +258,11 @@ func (s *RuntimeServices) userIsCurrent(user panel.UserInfo) bool {
 	return ok && current.Uuid == user.Uuid
 }
 
-func (s *RuntimeServices) takeConnections(uid int) []net.Conn {
+func (s *RuntimeServices) takeConnections(uid int) []io.Closer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	active := s.connections[uid]
-	connections := make([]net.Conn, 0, len(active))
+	connections := make([]io.Closer, 0, len(active))
 	for conn := range active {
 		connections = append(connections, conn)
 	}
@@ -270,7 +287,7 @@ func trafficDelta(current, committed int64) int64 {
 	return current - committed
 }
 
-func closeConnections(connections []net.Conn) {
+func closeConnections(connections []io.Closer) {
 	for _, conn := range connections {
 		_ = conn.Close()
 	}
@@ -283,6 +300,14 @@ func remoteIP(addr net.Addr) string {
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
 		return addr.String()
+	}
+	return host
+}
+
+func remoteIPString(address string) string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
 	}
 	return host
 }
