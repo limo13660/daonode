@@ -183,8 +183,12 @@ func (r *runtime) restartLocked() error {
 func (r *runtime) buildInstanceLocked() (*singbox.Box, context.CancelFunc, error) {
 	common := r.info.Common
 	cert := common.CertInfo
-	if cert == nil || cert.CertFile == "" || cert.KeyFile == "" {
+	certificateRequired := cert == nil || cert.CertMode != "none"
+	if certificateRequired && (cert == nil || cert.CertFile == "" || cert.KeyFile == "") {
 		return nil, nil, fmt.Errorf("NaiveProxy TLS certificate files are missing")
+	}
+	if !certificateRequired && strings.ToUpper(common.TransportProtocol) != "TCP" {
+		return nil, nil, fmt.Errorf("NaiveProxy without a certificate only supports TCP relay nodes")
 	}
 
 	users := make([]map[string]any, 0, len(r.users))
@@ -201,12 +205,14 @@ func (r *runtime) buildInstanceLocked() (*singbox.Box, context.CancelFunc, error
 		"listen_port": common.ServerPort,
 		"network":     strings.ToLower(common.TransportProtocol),
 		"users":       users,
-		"tls": map[string]any{
+	}
+	if certificateRequired {
+		inbound["tls"] = map[string]any{
 			"enabled":          true,
 			"server_name":      common.TlsSettings.PrimaryServerName(),
 			"certificate_path": cert.CertFile,
 			"key_path":         cert.KeyFile,
-		},
+		}
 	}
 	if value := strings.TrimSpace(common.ProtocolSettings.QUICCongestionControl); value != "" {
 		inbound["quic_congestion_control"] = value

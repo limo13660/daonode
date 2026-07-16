@@ -188,14 +188,21 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		if common.TransportProtocol != "TCP" && common.TransportProtocol != "UDP" {
 			return nil, fmt.Errorf("invalid NaiveProxy transport protocol: %s", common.TransportProtocol)
 		}
+		certMode := strings.ToLower(strings.TrimSpace(common.TlsSettings.CertMode))
+		if certMode == "" {
+			return nil, fmt.Errorf("NaiveProxy certificate mode is empty")
+		}
+		if !isSupportedNaiveCertMode(certMode) {
+			return nil, fmt.Errorf("unsupported NaiveProxy certificate mode: %s", certMode)
+		}
 		if common.Tls != Tls {
-			return nil, fmt.Errorf("NaiveProxy requires TLS")
+			return nil, fmt.Errorf("NaiveProxy certificate mode %s requires TLS", certMode)
 		}
 		if common.TlsSettings.PrimaryServerName() == "" {
 			return nil, fmt.Errorf("NaiveProxy TLS server name is empty")
 		}
-		if common.TlsSettings.CertMode == "" || common.TlsSettings.CertMode == "none" {
-			return nil, fmt.Errorf("NaiveProxy certificate mode is empty")
+		if certMode == "none" && common.TransportProtocol != "TCP" {
+			return nil, fmt.Errorf("NaiveProxy without a certificate only supports TCP relay nodes")
 		}
 		if common.UserNamePrefix == "" {
 			common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
@@ -371,6 +378,15 @@ func isEnvironmentVariableName(value string) bool {
 		return false
 	}
 	return true
+}
+
+func isSupportedNaiveCertMode(value string) bool {
+	switch value {
+	case "self", "http", "dns", "file", "none":
+		return true
+	default:
+		return false
+	}
 }
 
 func intervalToTime(value any) (time.Duration, error) {
