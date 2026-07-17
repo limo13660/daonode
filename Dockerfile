@@ -2,9 +2,9 @@
 FROM golang:1.26.1-alpine AS builder
 WORKDIR /app
 COPY . .
-ENV CGO_ENABLED=0
-RUN GOEXPERIMENT=jsonv2 go mod download
-RUN GOEXPERIMENT=jsonv2 go build -tags with_quic -v -o daonode
+ENV CGO_ENABLED=0 GOEXPERIMENT=jsonv2 GOTOOLCHAIN=local
+RUN go mod download
+RUN go build -tags with_quic -v -o daonode
 
 # Release
 FROM  alpine

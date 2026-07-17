@@ -24,11 +24,21 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 	for i, node := range nodes {
 		p, err := panel.New(&node)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"initialize panel client for node [%s-%d]: %w",
+				node.APIHost,
+				node.NodeID,
+				err,
+			)
 		}
 		info, err := p.GetNodeInfo(context.Background())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"get node info for [%s-%d]: %w",
+				node.APIHost,
+				node.NodeID,
+				err,
+			)
 		}
 		if info == nil {
 			return nil, fmt.Errorf("panel returned no node info for [%s-%d]", node.APIHost, node.NodeID)

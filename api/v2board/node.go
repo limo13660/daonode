@@ -40,6 +40,7 @@ type CommonNode struct {
 	Kernel              string           `json:"kernel"`
 	ListenIP            string           `json:"listen_ip"`
 	ServerPort          int              `json:"server_port"`
+	SpeedLimit          int              `json:"speed_limit"`
 	TransportProtocol   string           `json:"transport_protocol"`
 	PortBindings        []PortBinding    `json:"port_bindings"`
 	MTU                 int              `json:"mtu"`
@@ -149,6 +150,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	}
 	if common.ServerPort < 1 || common.ServerPort > 65535 {
 		return nil, fmt.Errorf("invalid server port: %d", common.ServerPort)
+	}
+	if common.SpeedLimit < 0 {
+		return nil, fmt.Errorf("invalid node speed limit: %d Mbps", common.SpeedLimit)
 	}
 	common.ListenIP = strings.TrimSpace(common.ListenIP)
 	if common.ListenIP == "" {
@@ -386,8 +390,17 @@ func normalizeACMEDomain(value string) (string, error) {
 		}
 	}
 	publicSuffix, isICANN := publicsuffix.PublicSuffix(ascii)
-	if !isICANN || publicSuffix == ascii {
-		return "", fmt.Errorf("ACME domain must end with a valid public suffix")
+	// The public suffix list also contains explicitly registered private
+	// suffixes such as pages.dev and github.io. They are valid ACME targets
+	// when the concrete hostname points to this server, even though the PSL
+	// marks the suffix as private instead of ICANN-managed. Unknown/special
+	// use suffixes fall back to a single-label rule and remain rejected.
+	recognizedPrivateSuffix := !isICANN && strings.Contains(publicSuffix, ".")
+	if publicSuffix == ascii || (!isICANN && !recognizedPrivateSuffix) {
+		return "", fmt.Errorf(
+			"ACME domain %q must contain a registrable name under a recognized public suffix",
+			ascii,
+		)
 	}
 	return ascii, nil
 }

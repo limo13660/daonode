@@ -2,8 +2,11 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"syscall"
 
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/common/task"
@@ -26,6 +29,7 @@ type Controller struct {
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
+	tcpLatencyProbe         *tcpLatencyProbe
 }
 
 // NewController return a Node controller with default parameters.
@@ -74,7 +78,13 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
-	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
+	c.limiter = limiter.AddLimiter(
+		c.info.Type,
+		c.tag,
+		c.info.Common.SpeedLimit,
+		c.userList,
+		c.aliveMap,
+	)
 	added, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,
@@ -88,12 +98,58 @@ func (c *Controller) Start(x *core.V2Core) error {
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	c.info = node
 	c.active = true
+	c.startTCPLatencyProbe(node)
 	c.startTasks(node)
 	return nil
 }
 
+func (c *Controller) startTCPLatencyProbe(node *panel.NodeInfo) {
+	if node == nil || node.Common == nil || !strings.EqualFold(node.Common.TransportProtocol, "UDP") {
+		return
+	}
+	if node.Common.ServerPort == 80 &&
+		node.Common.CertInfo != nil &&
+		node.Common.CertInfo.CertMode == "http" {
+		log.WithFields(log.Fields{
+			"tag":  c.tag,
+			"port": node.Common.ServerPort,
+		}).Warn("TCP latency probe disabled because HTTP ACME renewal requires TCP port 80")
+		return
+	}
+	probe, err := startTCPLatencyProbe(
+		node.Common.ListenIP,
+		node.Common.ServerPort,
+	)
+	if err == nil {
+		c.tcpLatencyProbe = probe
+		log.WithFields(log.Fields{
+			"tag":  c.tag,
+			"port": node.Common.ServerPort,
+		}).Info("Started TCP latency probe for UDP node")
+		return
+	}
+
+	fields := log.Fields{
+		"tag":  c.tag,
+		"port": node.Common.ServerPort,
+		"err":  err,
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		log.WithFields(fields).Info(
+			"TCP latency probe port is already in use; keeping the existing TCP service",
+		)
+		return
+	}
+	log.WithFields(fields).Warn("Start TCP latency probe failed")
+}
+
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
+	var probeErr error
+	if c.tcpLatencyProbe != nil {
+		probeErr = c.tcpLatencyProbe.Close()
+		c.tcpLatencyProbe = nil
+	}
 	var tasks sync.WaitGroup
 	for _, periodic := range []*task.Task{
 		c.nodeInfoMonitorPeriodic,
@@ -120,6 +176,9 @@ func (c *Controller) Close() error {
 	c.active = false
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)
+	}
+	if probeErr != nil {
+		return fmt.Errorf("close TCP latency probe: %s", probeErr)
 	}
 	return nil
 }
