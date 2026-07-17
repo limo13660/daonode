@@ -40,6 +40,7 @@ type CommonNode struct {
 	Kernel              string           `json:"kernel"`
 	ListenIP            string           `json:"listen_ip"`
 	ServerPort          int              `json:"server_port"`
+	SpeedLimit          int              `json:"speed_limit"`
 	TransportProtocol   string           `json:"transport_protocol"`
 	PortBindings        []PortBinding    `json:"port_bindings"`
 	MTU                 int              `json:"mtu"`
@@ -149,6 +150,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	}
 	if common.ServerPort < 1 || common.ServerPort > 65535 {
 		return nil, fmt.Errorf("invalid server port: %d", common.ServerPort)
+	}
+	if common.SpeedLimit < 0 {
+		return nil, fmt.Errorf("invalid node speed limit: %d Mbps", common.SpeedLimit)
 	}
 	common.ListenIP = strings.TrimSpace(common.ListenIP)
 	if common.ListenIP == "" {

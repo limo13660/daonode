@@ -78,7 +78,13 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
-	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
+	c.limiter = limiter.AddLimiter(
+		c.info.Type,
+		c.tag,
+		c.info.Common.SpeedLimit,
+		c.userList,
+		c.aliveMap,
+	)
 	added, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,

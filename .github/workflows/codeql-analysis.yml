@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GOEXPERIMENT: jsonv2
+      GOTOOLCHAIN: local
 
     strategy:
       fail-fast: false
