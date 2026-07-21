@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -316,11 +315,8 @@ func (r *runtime) rebuildPolicyLocked() {
 }
 
 func (r *runtime) userName(uid int) string {
-	prefix := strings.TrimSpace(r.info.Common.UserNamePrefix)
-	if prefix == "" {
-		prefix = "n" + strconv.Itoa(r.info.Id)
-	}
-	return prefix + "-" + strconv.Itoa(uid)
+	identifier := r.info.Common.EffectivePanelIdentifier(r.info.Id)
+	return panel.BuildPanelUserName(identifier, uid)
 }
 
 func (r *runtime) userForName(name string) (panel.UserInfo, *userCounter, bool) {

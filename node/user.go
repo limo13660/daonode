@@ -73,6 +73,25 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	return nil
 }
 
+// flushUserTraffic makes one non-retried, best-effort submission after the
+// periodic tasks have stopped and before the runtime counters are discarded.
+// A failed submission is deliberately left uncommitted.
+func (c *Controller) flushUserTraffic(ctx context.Context) error {
+	userTraffic, err := c.server.GetUserTrafficSlice(c.tag, 0)
+	if err != nil {
+		return err
+	}
+	if len(userTraffic) == 0 {
+		return nil
+	}
+	if err := c.apiClient.ReportUserTraffic(ctx, userTraffic); err != nil {
+		return err
+	}
+	c.server.CommitUserTraffic(c.tag, userTraffic)
+	log.WithField("tag", c.tag).Infof("Flushed %d users traffic before runtime stop", len(userTraffic))
+	return nil
+}
+
 func filterTrafficByMinimum(traffic []panel.UserTraffic, minimum int) []panel.UserTraffic {
 	if minimum <= 0 {
 		return traffic

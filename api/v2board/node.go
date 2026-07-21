@@ -36,23 +36,25 @@ type NodeInfo struct {
 }
 
 type CommonNode struct {
-	Protocol            string           `json:"protocol"`
-	Kernel              string           `json:"kernel"`
-	ListenIP            string           `json:"listen_ip"`
-	ServerPort          int              `json:"server_port"`
-	SpeedLimit          int              `json:"speed_limit"`
-	TransportProtocol   string           `json:"transport_protocol"`
-	PortBindings        []PortBinding    `json:"port_bindings"`
-	MTU                 int              `json:"mtu"`
-	TrafficPattern      string           `json:"traffic_pattern"`
-	UserHintIsMandatory bool             `json:"user_hint_is_mandatory"`
-	UserNamePrefix      string           `json:"username_prefix"`
-	ProtocolSettings    ProtocolSettings `json:"protocol_settings"`
-	Routes              []Route          `json:"routes"`
-	BaseConfig          *BaseConfig      `json:"base_config"`
-	Tls                 int              `json:"tls"`
-	TlsSettings         TlsSettings      `json:"tls_settings"`
-	CertInfo            *CertInfo        `json:"-"`
+	Protocol            string        `json:"protocol"`
+	Kernel              string        `json:"kernel"`
+	ListenIP            string        `json:"listen_ip"`
+	ServerPort          int           `json:"server_port"`
+	SpeedLimit          int           `json:"speed_limit"`
+	TransportProtocol   string        `json:"transport_protocol"`
+	PortBindings        []PortBinding `json:"port_bindings"`
+	MTU                 int           `json:"mtu"`
+	TrafficPattern      string        `json:"traffic_pattern"`
+	UserHintIsMandatory bool          `json:"user_hint_is_mandatory"`
+	PanelIdentifier     string        `json:"panel_identifier"`
+	// UserNamePrefix is the compatibility alias used by older DaoBoard builds.
+	UserNamePrefix   string           `json:"username_prefix"`
+	ProtocolSettings ProtocolSettings `json:"protocol_settings"`
+	Routes           []Route          `json:"routes"`
+	BaseConfig       *BaseConfig      `json:"base_config"`
+	Tls              int              `json:"tls"`
+	TlsSettings      TlsSettings      `json:"tls_settings"`
+	CertInfo         *CertInfo        `json:"-"`
 }
 
 type ProtocolSettings struct {
@@ -161,6 +163,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	if net.ParseIP(common.ListenIP) == nil {
 		return nil, fmt.Errorf("invalid listen IP: %s", common.ListenIP)
 	}
+	common.PanelIdentifier = strings.TrimSpace(common.PanelIdentifier)
+	common.UserNamePrefix = strings.TrimSpace(common.UserNamePrefix)
+	if common.PanelIdentifier != "" {
+		common.UserNamePrefix = common.PanelIdentifier
+	} else if common.UserNamePrefix == "" {
+		common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
+	}
 	if common.Protocol == "mieru" {
 		if common.TransportProtocol == "" {
 			common.TransportProtocol = "TCP"
@@ -187,9 +196,6 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		if common.MTU == 0 {
 			common.MTU = 1400
 		}
-		if common.UserNamePrefix == "" {
-			common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
-		}
 	}
 	if common.Protocol == "naive" {
 		if common.TransportProtocol == "" {
@@ -214,9 +220,6 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		}
 		if certMode == "none" && common.TransportProtocol != "TCP" {
 			return nil, fmt.Errorf("NaiveProxy without a certificate only supports TCP relay nodes")
-		}
-		if common.UserNamePrefix == "" {
-			common.UserNamePrefix = fmt.Sprintf("n%d", c.NodeId)
 		}
 	}
 	if common.BaseConfig == nil {

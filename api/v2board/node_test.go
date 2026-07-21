@@ -32,6 +32,8 @@ func TestGetNodeInfoNaiveECHContract(t *testing.T) {
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"protocol":           "naive",
 			"kernel":             "singbox",
+			"panel_identifier":   "ysbl-panel",
+			"username_prefix":    "ysbl-panel",
 			"listen_ip":          "::",
 			"server_port":        8443,
 			"speed_limit":        100,
@@ -81,6 +83,9 @@ func TestGetNodeInfoNaiveECHContract(t *testing.T) {
 	}
 	if info.Security != Tls || info.Common.TransportProtocol != "UDP" {
 		t.Fatalf("Naive transport contract was not preserved: %#v", info.Common)
+	}
+	if info.Common.PanelIdentifier != "ysbl-panel" || info.Common.UserNamePrefix != "ysbl-panel" {
+		t.Fatalf("panel identifier contract = %#v", info.Common)
 	}
 	if info.Common.ProtocolSettings.QUICCongestionControl != "bbr2" ||
 		!info.Common.ProtocolSettings.UDPOverTCP {

@@ -28,6 +28,22 @@ func TestCompareUserListContract(t *testing.T) {
 	}
 }
 
+func TestChangedUserIDRotatesThePanelScopedUsername(t *testing.T) {
+	oldUsers := []panel.UserInfo{{Id: 42, Uuid: "stable-password"}}
+	newUsers := []panel.UserInfo{{Id: 99, Uuid: "stable-password"}}
+
+	deleted, added, modified := compareUserList(oldUsers, newUsers)
+
+	assertUserIDs(t, "deleted", deleted, map[int]bool{42: true})
+	assertUserIDs(t, "added", added, map[int]bool{99: true})
+	if len(modified) != 0 {
+		t.Fatalf("ID change reported modified users: %#v", modified)
+	}
+	if oldName, newName := panel.BuildPanelUserName("ysbl-panel", 42), panel.BuildPanelUserName("ysbl-panel", 99); oldName == newName {
+		t.Fatalf("ID change did not rotate username %q", oldName)
+	}
+}
+
 func assertUserIDs(t *testing.T, label string, users []panel.UserInfo, want map[int]bool) {
 	t.Helper()
 	if len(users) != len(want) {

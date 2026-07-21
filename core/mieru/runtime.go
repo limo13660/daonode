@@ -642,7 +642,14 @@ func mieruUDPHeader(addr model.AddrSpec) ([]byte, error) {
 }
 
 func (m *mieruRuntime) userName(uid int) string {
-	return fmt.Sprintf("%su%d", m.info.Common.UserNamePrefix, uid)
+	identifier := m.info.Common.EffectivePanelIdentifier(m.info.Id)
+	if strings.TrimSpace(m.info.Common.PanelIdentifier) == "" {
+		// Older DaoBoard versions only sent username_prefix and used the
+		// historical Mieru <node-prefix>u<uid> format. Keep accepting it when
+		// daonode is upgraded before the panel.
+		return fmt.Sprintf("%su%d", identifier, uid)
+	}
+	return panel.BuildPanelUserName(identifier, uid)
 }
 
 func (m *mieruRuntime) userByName(name string) (panel.UserInfo, bool) {
@@ -652,7 +659,12 @@ func (m *mieruRuntime) userByName(name string) (panel.UserInfo, bool) {
 }
 
 func (m *mieruRuntime) userByNameLocked(name string) (panel.UserInfo, bool) {
-	prefix := m.info.Common.UserNamePrefix + "u"
+	prefix := m.info.Common.EffectivePanelIdentifier(m.info.Id)
+	if strings.TrimSpace(m.info.Common.PanelIdentifier) == "" {
+		prefix += "u"
+	} else {
+		prefix += "-"
+	}
 	idText, ok := strings.CutPrefix(name, prefix)
 	if !ok {
 		return panel.UserInfo{}, false

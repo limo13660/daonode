@@ -92,7 +92,10 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 	}
 	// node no changed, check users
 	if newU != nil {
-		deleted, added, modified := compareUserList(c.userList, newU)
+		c.stateMu.RLock()
+		previousUsers := cloneUsers(c.userList)
+		c.stateMu.RUnlock()
+		deleted, added, modified := compareUserList(previousUsers, newU)
 		if len(deleted) > 0 || len(added) > 0 {
 			err = c.server.SyncUsers(c.tag, deleted, added)
 			if err != nil {
@@ -110,7 +113,9 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 			// update Limiter
 			c.limiter.UpdateUser(c.tag, added, deleted, modified)
 		}
-		c.userList = newU
+		c.stateMu.Lock()
+		c.userList = cloneUsers(newU)
+		c.stateMu.Unlock()
 		log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	} else {
 		log.WithField("tag", c.tag).Debug("User list no change")
@@ -126,6 +131,9 @@ func (c *Controller) syncUsers(ctx context.Context) (err error) {
 	}
 	if newA != nil {
 		c.limiter.SetAliveList(newA)
+		c.stateMu.Lock()
+		c.aliveMap = cloneAliveMap(newA)
+		c.stateMu.Unlock()
 	}
 	return nil
 }

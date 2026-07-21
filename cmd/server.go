@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +25,18 @@ var (
 	watch  bool
 )
 
-const startupRetryInterval = 10 * time.Second
+const (
+	startupRetryInterval = 10 * time.Second
+	reloadRetryBase      = 10 * time.Second
+	reloadRetryMaximum   = 5 * time.Minute
+)
+
+type serverRuntime struct {
+	config   *conf.Conf
+	nodes    *node.Node
+	core     *core.V2Core
+	snapshot *node.Snapshot
+}
 
 var serverCommand = cobra.Command{
 	Use:   "server",
@@ -76,18 +88,24 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	if !started {
 		return
 	}
+	snapshot, err := nodes.Snapshot()
+	if err != nil {
+		log.WithField("err", err).Error("Capture initial runtime snapshot failed")
+		_ = nodes.Close()
+		_ = runtimeCore.Close()
+		return
+	}
+	state := &serverRuntime{
+		config:   c,
+		nodes:    nodes,
+		core:     runtimeCore,
+		snapshot: snapshot,
+	}
 	log.Info("Got nodes info from server")
 	log.Info("Nodes started")
 	defer func() {
-		if nodes != nil {
-			if err := nodes.Close(); err != nil {
-				log.WithField("err", err).Error("Close nodes failed")
-			}
-		}
-		if runtimeCore != nil {
-			if err := runtimeCore.Close(); err != nil {
-				log.WithField("err", err).Error("Close core failed")
-			}
+		if err := state.closeActive(); err != nil {
+			log.WithField("err", err).Error("Close runtime failed")
 		}
 	}()
 
@@ -103,6 +121,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		}
 	}
 	runtime.GC()
+	reloadFailures := 0
 
 	for {
 		select {
@@ -111,10 +130,20 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			return
 		case <-reloadCh:
 			log.Info("Received reload signal, reloading configuration")
-			if err := reload(config, &nodes, &runtimeCore); err != nil {
+			if err := reload(config, state, reloadCh); err != nil {
 				log.WithField("err", err).Error("Reload failed")
-				return
+				if !state.running() && !restoreRuntimeWithRetry(state, reloadCh, osSignals) {
+					return
+				}
+				reloadFailures++
+				drainReloadSignals(reloadCh)
+				delay := reloadRetryDelay(reloadFailures)
+				log.WithField("retry_in", delay).Warn("Keeping last-known-good runtime and scheduling reload retry")
+				scheduleReload(reloadCh, delay)
+				continue
 			}
+			reloadFailures = 0
+			drainReloadSignals(reloadCh)
 			log.Info("Reload completed")
 		}
 	}
@@ -128,15 +157,11 @@ func startRuntimeWithRetry(
 	for {
 		nodes, err := node.New(c.NodeConfigs)
 		if err == nil {
-			runtimeCore := core.New(c)
-			runtimeCore.ReloadCh = reloadCh
-			if err = runtimeCore.Start(nodes.NodeInfos); err == nil {
-				if err = nodes.Start(c.NodeConfigs, runtimeCore); err == nil {
-					return nodes, runtimeCore, true
-				}
-				_ = nodes.Close()
+			var runtimeCore *core.V2Core
+			runtimeCore, err = startPreparedRuntime(c, nodes, reloadCh)
+			if err == nil {
+				return nodes, runtimeCore, true
 			}
-			_ = runtimeCore.Close()
 		}
 
 		log.WithFields(log.Fields{
@@ -157,7 +182,10 @@ func startRuntimeWithRetry(
 	}
 }
 
-func reload(configPath string, nodes **node.Node, runtimeCore **core.V2Core) error {
+func reload(configPath string, state *serverRuntime, reloadCh chan struct{}) error {
+	if state == nil || !state.running() {
+		return fmt.Errorf("active runtime is unavailable")
+	}
 	newConf := conf.New()
 	if err := newConf.LoadFromPath(configPath); err != nil {
 		return err
@@ -166,39 +194,180 @@ func reload(configPath string, nodes **node.Node, runtimeCore **core.V2Core) err
 	if err != nil {
 		return err
 	}
-
-	var reloadCh chan struct{}
-	if *runtimeCore != nil {
-		reloadCh = (*runtimeCore).ReloadCh
-	}
-	if *nodes != nil {
-		if err := (*nodes).Close(); err != nil {
-			return err
-		}
-	}
-	if *runtimeCore != nil {
-		if err := (*runtimeCore).Close(); err != nil {
-			return err
-		}
-	}
-
-	newCore := core.New(newConf)
-	newCore.ReloadCh = reloadCh
-	if err := newCore.Start(newNodes.NodeInfos); err != nil {
-		_ = newCore.Close()
-		return err
-	}
-	if err := newNodes.Start(newConf.NodeConfigs, newCore); err != nil {
+	candidateSnapshot, err := newNodes.Snapshot()
+	if err != nil {
 		_ = newNodes.Close()
-		_ = newCore.Close()
-		return err
+		return fmt.Errorf("snapshot prepared candidate: %w", err)
+	}
+	validationCore := core.New(newConf)
+	if err := validationCore.Start(newNodes.NodeInfos); err != nil {
+		_ = newNodes.Close()
+		return fmt.Errorf("validate candidate runtime: %w", err)
+	}
+	lastKnownGood, err := state.nodes.Snapshot()
+	if err != nil {
+		_ = newNodes.Close()
+		return fmt.Errorf("snapshot active runtime: %w", err)
+	}
+	previousConfig := state.config
+	state.snapshot = lastKnownGood
+
+	if err := state.closeActive(); err != nil {
+		_ = newNodes.Close()
+		restoreErr := state.restore(reloadCh)
+		return errors.Join(
+			fmt.Errorf("stop active runtime: %w", err),
+			wrapRestoreError(restoreErr),
+		)
+	}
+
+	newCore, err := startPreparedRuntime(newConf, newNodes, reloadCh)
+	if err != nil {
+		state.config = previousConfig
+		restoreErr := state.restore(reloadCh)
+		return errors.Join(
+			fmt.Errorf("activate candidate runtime: %w", err),
+			wrapRestoreError(restoreErr),
+		)
 	}
 
 	applyLogConfig(newConf.LogConfig)
-	*nodes = newNodes
-	*runtimeCore = newCore
+	state.config = newConf
+	state.nodes = newNodes
+	state.core = newCore
+	state.snapshot = candidateSnapshot
 	runtime.GC()
 	return nil
+}
+
+func startPreparedRuntime(c *conf.Conf, nodes *node.Node, reloadCh chan struct{}) (*core.V2Core, error) {
+	if c == nil || nodes == nil {
+		return nil, fmt.Errorf("prepared runtime is incomplete")
+	}
+	runtimeCore := core.New(c)
+	runtimeCore.ReloadCh = reloadCh
+	if err := runtimeCore.Start(nodes.NodeInfos); err != nil {
+		_ = nodes.Close()
+		_ = runtimeCore.Close()
+		return nil, err
+	}
+	if err := nodes.Start(c.NodeConfigs, runtimeCore); err != nil {
+		_ = nodes.Close()
+		_ = runtimeCore.Close()
+		return nil, err
+	}
+	return runtimeCore, nil
+}
+
+func (s *serverRuntime) running() bool {
+	return s != nil && s.nodes != nil && s.core != nil
+}
+
+func (s *serverRuntime) closeActive() error {
+	if s == nil {
+		return nil
+	}
+	var closeErrors []error
+	if s.nodes != nil {
+		if err := s.nodes.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close nodes: %w", err))
+		}
+	}
+	if s.core != nil {
+		if err := s.core.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close core: %w", err))
+		}
+	}
+	s.nodes = nil
+	s.core = nil
+	return errors.Join(closeErrors...)
+}
+
+func (s *serverRuntime) restore(reloadCh chan struct{}) error {
+	if s == nil || s.config == nil || s.snapshot == nil {
+		return fmt.Errorf("last-known-good runtime is unavailable")
+	}
+	restoredNodes, err := node.NewFromSnapshot(s.snapshot)
+	if err != nil {
+		return err
+	}
+	restoredCore, err := startPreparedRuntime(s.config, restoredNodes, reloadCh)
+	if err != nil {
+		return err
+	}
+	s.nodes = restoredNodes
+	s.core = restoredCore
+	log.Info("Last-known-good runtime restored")
+	return nil
+}
+
+func restoreRuntimeWithRetry(
+	state *serverRuntime,
+	reloadCh chan struct{},
+	osSignals <-chan os.Signal,
+) bool {
+	for !state.running() {
+		timer := time.NewTimer(startupRetryInterval)
+		select {
+		case <-osSignals:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			log.Info("Received exit signal while waiting to restore the last-known-good runtime")
+			return false
+		case <-timer.C:
+		}
+		if err := state.restore(reloadCh); err != nil {
+			log.WithFields(log.Fields{
+				"err":      err,
+				"retry_in": startupRetryInterval,
+			}).Error("Restore last-known-good runtime failed")
+		}
+	}
+	return true
+}
+
+func wrapRestoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("restore last-known-good runtime: %w", err)
+}
+
+func reloadRetryDelay(failures int) time.Duration {
+	if failures <= 1 {
+		return reloadRetryBase
+	}
+	delay := reloadRetryBase
+	for i := 1; i < failures && delay < reloadRetryMaximum; i++ {
+		if delay > reloadRetryMaximum/2 {
+			return reloadRetryMaximum
+		}
+		delay *= 2
+	}
+	if delay > reloadRetryMaximum {
+		return reloadRetryMaximum
+	}
+	return delay
+}
+
+func scheduleReload(reloadCh chan struct{}, delay time.Duration) {
+	time.AfterFunc(delay, func() {
+		select {
+		case reloadCh <- struct{}{}:
+		default:
+		}
+	})
+}
+
+func drainReloadSignals(reloadCh chan struct{}) {
+	for {
+		select {
+		case <-reloadCh:
+		default:
+			return
+		}
+	}
 }
 
 func applyLogConfig(config conf.LogConfig) {
