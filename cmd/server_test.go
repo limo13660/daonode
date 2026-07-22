@@ -94,6 +94,48 @@ func TestReloadKeepsActiveRuntimeWhenCandidatePanelIsUnavailable(t *testing.T) {
 	assertTCPListening(t, oldPort)
 }
 
+func TestReloadKeepsActiveRuntimeWhenCandidateRuntimeIsInvalid(t *testing.T) {
+	limiter.Init()
+	oldPort := reserveTCPPort(t)
+	oldPanel := newNaivePanel(t, oldPort)
+	defer oldPanel.Close()
+
+	oldConfig := testConfig(oldPanel.URL)
+	oldNodes, err := node.New(oldConfig.NodeConfigs)
+	if err != nil {
+		t.Fatalf("prepare old nodes: %v", err)
+	}
+	reloadCh := make(chan struct{}, 1)
+	oldCore, err := startPreparedRuntime(oldConfig, oldNodes, reloadCh)
+	if err != nil {
+		t.Fatalf("start old runtime: %v", err)
+	}
+	snapshot, err := oldNodes.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot old runtime: %v", err)
+	}
+	state := &serverRuntime{config: oldConfig, nodes: oldNodes, core: oldCore, snapshot: snapshot}
+	defer func() { _ = state.closeActive() }()
+	oldNodesPointer := state.nodes
+	oldCorePointer := state.core
+
+	candidatePanel := newNaivePanelWithRoutes(t, reserveTCPPort(t), []map[string]any{{
+		"id":     9,
+		"action": "block_port",
+		"match":  []string{"invalid-port"},
+	}})
+	defer candidatePanel.Close()
+	configPath := writeTestConfig(t, candidatePanel.URL)
+
+	if err := reload(configPath, state, reloadCh); err == nil {
+		t.Fatal("reload() succeeded with an invalid candidate route")
+	}
+	if state.nodes != oldNodesPointer || state.core != oldCorePointer {
+		t.Fatal("active runtime changed before candidate runtime validation completed")
+	}
+	assertTCPListening(t, oldPort)
+}
+
 func TestReloadRetryDelayIsBounded(t *testing.T) {
 	tests := []struct {
 		failures int
@@ -115,6 +157,11 @@ func TestReloadRetryDelayIsBounded(t *testing.T) {
 
 func newNaivePanel(t *testing.T, port int) *httptest.Server {
 	t.Helper()
+	return newNaivePanelWithRoutes(t, port, nil)
+}
+
+func newNaivePanelWithRoutes(t *testing.T, port int, routes []map[string]any) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -126,6 +173,7 @@ func newNaivePanel(t *testing.T, port int) *httptest.Server {
 				"server_port":        port,
 				"transport_protocol": "TCP",
 				"tls":                1,
+				"routes":             routes,
 				"tls_settings": map[string]any{
 					"server_name": "node.test",
 					"cert_mode":   "none",

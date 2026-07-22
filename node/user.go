@@ -46,12 +46,19 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			"tag": c.tag,
 			"err": err,
 		}).Info("Get online device failed")
-	} else if len(*onlineDevice) > 0 {
+	} else {
 		result := filterOnlineUsers(*onlineDevice, userTraffic, devicemin)
+		offline := c.limiter.GetPendingOfflineUsers()
 		data := make(map[int][]string)
 		for _, onlineuser := range result {
 			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
+		}
+		for _, offlineUser := range offline {
+			if _, onlineNow := data[offlineUser.UID]; !onlineNow {
+				// A non-nil empty slice must be encoded as [] instead of null.
+				data[offlineUser.UID] = []string{}
+			}
 		}
 		if len(data) != 0 {
 			err := c.apiClient.ReportNodeOnlineUsers(ctx, &data)
@@ -65,6 +72,20 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				}
 			} else {
 				c.limiter.MarkOnlineDeviceReported(result)
+				if len(offline) > 0 {
+					// The panel invalidates its aggregate alive cache after accepting
+					// this report. Refresh it before removing the local reconnect grace.
+					alive, aliveErr := c.apiClient.GetUserAlive(ctx)
+					if aliveErr != nil {
+						log.WithFields(log.Fields{
+							"tag": c.tag,
+							"err": aliveErr,
+						}).Info("Refresh alive list after offline report failed")
+					} else {
+						c.limiter.SetAliveList(alive)
+						c.limiter.MarkOfflineUsersReported(offline)
+					}
+				}
 			}
 		}
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))

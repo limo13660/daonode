@@ -204,6 +204,12 @@ func reload(configPath string, state *serverRuntime, reloadCh chan struct{}) err
 		_ = newNodes.Close()
 		return fmt.Errorf("validate candidate runtime: %w", err)
 	}
+	for _, candidate := range candidateSnapshot.Nodes {
+		if err := validationCore.ValidateRuntime(candidate.Info.Tag, candidate.Info, candidate.Users); err != nil {
+			_ = newNodes.Close()
+			return fmt.Errorf("validate candidate runtime: %w", err)
+		}
+	}
 	lastKnownGood, err := state.nodes.Snapshot()
 	if err != nil {
 		_ = newNodes.Close()

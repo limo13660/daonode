@@ -2,6 +2,7 @@ package singbox
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -90,6 +91,31 @@ func (r *runtime) Stop() error {
 	}
 }
 
+// Validate builds the official sing-box instance without starting it. This
+// catches invalid Naive, route, ECH, QUIC and TLS configuration before a
+// reload stops the currently working instance.
+func (r *runtime) Validate(users []panel.UserInfo) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	previousUsers := r.users
+	r.users = make(map[int]panel.UserInfo, len(users))
+	for _, user := range users {
+		r.users[user.Id] = user
+	}
+	defer func() { r.users = previousUsers }()
+
+	instance, cancel, err := r.buildInstanceLocked()
+	if err != nil {
+		return err
+	}
+	cancel()
+	if err := instance.Close(); err != nil {
+		return fmt.Errorf("close validated sing-box runtime: %w", err)
+	}
+	return nil
+}
+
 func (r *runtime) AddUsers(users []panel.UserInfo) (int, error) {
 	if err := r.SyncUsers(nil, users); err != nil {
 		return 0, err
@@ -116,6 +142,20 @@ func (r *runtime) SyncUsers(deleted, added []panel.UserInfo) error {
 		r.users[user.Id] = user
 	}
 	r.rebuildPolicyLocked()
+	if r.instance != nil && len(r.users) > 0 && len(added) == 0 {
+		// The official Naive authenticator is immutable, but retaining a deleted
+		// credential inside it is safe because the tracker consults byName before
+		// accepting or accounting a connection. Revoke the deleted users at the
+		// policy layer and close only their active streams, leaving every other
+		// user's HTTP/2 or HTTP/3 tunnel untouched.
+		r.RuntimeServices.SyncUsers(deleted, nil)
+		log.WithFields(log.Fields{
+			"tag":     r.tag,
+			"deleted": len(deleted),
+			"users":   len(r.users),
+		}).Info("Naive users removed without restarting the runtime")
+		return nil
+	}
 	r.accepting.Store(false)
 	r.RuntimeServices.SyncUsers(deleted, added)
 
@@ -188,6 +228,11 @@ func (r *runtime) buildInstanceLocked() (*singbox.Box, context.CancelFunc, error
 	certificateRequired := cert == nil || cert.CertMode != "none"
 	if certificateRequired && (cert == nil || cert.CertFile == "" || cert.KeyFile == "") {
 		return nil, nil, fmt.Errorf("NaiveProxy TLS certificate files are missing")
+	}
+	if certificateRequired {
+		if _, err := tls.LoadX509KeyPair(cert.CertFile, cert.KeyFile); err != nil {
+			return nil, nil, fmt.Errorf("load NaiveProxy TLS certificate: %w", err)
+		}
 	}
 	if !certificateRequired && strings.ToUpper(common.TransportProtocol) != "TCP" {
 		return nil, nil, fmt.Errorf("NaiveProxy without a certificate only supports TCP relay nodes")
@@ -356,6 +401,11 @@ func (t *connectionTracker) RoutedConnection(_ context.Context, conn net.Conn, m
 	}
 	limited, release, accepted := t.runtime.OpenConnection(user, conn, true)
 	if !accepted {
+		log.WithFields(log.Fields{
+			"tag":    t.runtime.tag,
+			"user":   metadata.User,
+			"source": metadata.Source.String(),
+		}).Debug("Naive connection rejected by user or device policy")
 		_ = conn.Close()
 		return conn
 	}

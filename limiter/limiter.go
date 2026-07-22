@@ -29,6 +29,7 @@ type Limiter struct {
 	onlineMu         sync.RWMutex
 	online           map[string]*onlineUserState
 	reported         map[string]map[string]struct{}
+	pendingOffline   map[string]int
 }
 
 type onlineUserState struct {
@@ -41,14 +42,23 @@ type UserLimitInfo struct {
 	DeviceLimit int
 }
 
+// OfflineUser identifies an exact locally-offline user snapshot. UserTag is
+// retained so an acknowledgement cannot clear a newer reconnect for the same
+// panel UID.
+type OfflineUser struct {
+	UserTag string
+	UID     int
+}
+
 func AddLimiter(nodetype string, tag string, speedLimit int, users []panel.UserInfo, aliveList map[int]int) *Limiter {
 	l := &Limiter{
-		Nodetype:      nodetype,
-		SpeedLimit:    speedLimit,
-		UserLimitInfo: new(sync.Map),
-		AliveList:     maps.Clone(aliveList),
-		online:        make(map[string]*onlineUserState),
-		reported:      make(map[string]map[string]struct{}),
+		Nodetype:       nodetype,
+		SpeedLimit:     speedLimit,
+		UserLimitInfo:  new(sync.Map),
+		AliveList:      maps.Clone(aliveList),
+		online:         make(map[string]*onlineUserState),
+		reported:       make(map[string]map[string]struct{}),
+		pendingOffline: make(map[string]int),
 	}
 	if speedLimit > 0 {
 		l.NodeSpeedLimiter = rate.NewDynamicBucket(int64(speedLimit) * 1000000 / 8)
@@ -115,6 +125,7 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		taguuid := format.UserTag(tag, deleted[i].Uuid)
 		delete(l.online, taguuid)
 		delete(l.reported, taguuid)
+		delete(l.pendingOffline, taguuid)
 	}
 	l.onlineMu.Unlock()
 }
@@ -164,11 +175,22 @@ func (l *Limiter) trackConnection(taguuid string, uid int, ip string, aliveIP, d
 	}
 	if state.ips[ip] > 0 {
 		state.ips[ip]++
+		delete(l.pendingOffline, taguuid)
 		return true
 	}
 
 	if deviceLimit > 0 {
 		reported := l.reported[taguuid]
+		// The panel count can still contain this runtime's last report after
+		// the final local stream closes. Treat an immediate reconnect from the
+		// exact reported IP as the same device, not as an additional device.
+		if _, pending := l.pendingOffline[taguuid]; pending {
+			if _, alreadyReported := reported[ip]; alreadyReported {
+				state.ips[ip] = 1
+				delete(l.pendingOffline, taguuid)
+				return true
+			}
+		}
 		reportedActive := 0
 		unreportedActive := 0
 		for activeIP := range state.ips {
@@ -187,6 +209,7 @@ func (l *Limiter) trackConnection(taguuid string, uid int, ip string, aliveIP, d
 		}
 	}
 	state.ips[ip] = 1
+	delete(l.pendingOffline, taguuid)
 	return true
 }
 
@@ -208,7 +231,11 @@ func (l *Limiter) ReleaseConnection(taguuid, ip string) {
 	delete(state.ips, ip)
 	if len(state.ips) == 0 {
 		delete(l.online, taguuid)
-		delete(l.reported, taguuid)
+		if len(l.reported[taguuid]) > 0 {
+			l.pendingOffline[taguuid] = state.uid
+		} else {
+			delete(l.pendingOffline, taguuid)
+		}
 	}
 }
 
@@ -223,6 +250,38 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 	}
 
 	return &onlineUser, nil
+}
+
+// GetPendingOfflineUsers returns users whose last locally-active IP was
+// previously reported to the panel. Callers should submit these UIDs with an
+// explicit empty IP array so the panel can remove the stale node contribution.
+func (l *Limiter) GetPendingOfflineUsers() []OfflineUser {
+	l.onlineMu.RLock()
+	defer l.onlineMu.RUnlock()
+	result := make([]OfflineUser, 0, len(l.pendingOffline))
+	for taguuid, uid := range l.pendingOffline {
+		result = append(result, OfflineUser{UserTag: taguuid, UID: uid})
+	}
+	return result
+}
+
+// MarkOfflineUsersReported clears only offline snapshots that are still
+// current. A reconnect removes pendingOffline, so a delayed acknowledgement
+// can never erase the newer online state.
+func (l *Limiter) MarkOfflineUsersReported(offline []OfflineUser) {
+	l.onlineMu.Lock()
+	defer l.onlineMu.Unlock()
+	for _, item := range offline {
+		uid, pending := l.pendingOffline[item.UserTag]
+		if !pending || uid != item.UID {
+			continue
+		}
+		if state := l.online[item.UserTag]; state != nil && len(state.ips) > 0 {
+			continue
+		}
+		delete(l.pendingOffline, item.UserTag)
+		delete(l.reported, item.UserTag)
+	}
 }
 
 // MarkOnlineDeviceReported records the exact snapshot accepted by the panel.

@@ -111,6 +111,25 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 	return nil
 }
 
+// ValidateRuntime constructs a candidate runtime far enough to validate its
+// kernel-owned configuration without starting listeners or changing active
+// runtime state.
+func (v *V2Core) ValidateRuntime(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {
+	kernel, _, err := normalizeNodeSelection(info)
+	if err != nil {
+		return err
+	}
+	candidate := kernelDefinitions[kernel].newRuntime(tag, info)
+	validator, ok := candidate.(contract.Validator)
+	if !ok {
+		return nil
+	}
+	if err := validator.Validate(users); err != nil {
+		return fmt.Errorf("validate runtime %s: %w", tag, err)
+	}
+	return nil
+}
+
 // KernelCapabilities returns the protocols implemented by each compiled-in
 // kernel. Adding another core/<kernel> adapter requires registering it here.
 func KernelCapabilities() []KernelCapability {

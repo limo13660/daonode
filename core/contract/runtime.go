@@ -22,3 +22,10 @@ type Runtime interface {
 	Traffic(int) ([]panel.UserTraffic, error)
 	CommitTraffic([]panel.UserTraffic)
 }
+
+// Validator is implemented by runtimes that can fully construct and validate
+// a candidate configuration without binding its listening sockets. Reloads
+// use it before stopping the active runtime.
+type Validator interface {
+	Validate([]panel.UserInfo) error
+}
