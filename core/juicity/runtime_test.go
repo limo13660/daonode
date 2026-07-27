@@ -126,6 +126,19 @@ func TestJuicityValidationAndHotCredentialSnapshot(t *testing.T) {
 	}
 }
 
+func TestOfficialJuicityIgnoresUnsupportedSemanticRoutes(t *testing.T) {
+	policy, err := compileRoutePolicy([]panel.Route{
+		{Id: 10, Action: "dns"},
+		{Id: 11, Action: "protocol", Match: []string{"bittorrent"}},
+	})
+	if err != nil {
+		t.Fatalf("compileRoutePolicy() rejected ignorable routes: %v", err)
+	}
+	if policy.blockAll || len(policy.domains) != 0 || len(policy.prefixes) != 0 || len(policy.ports) != 0 {
+		t.Fatalf("ignored route policy = %#v", policy)
+	}
+}
+
 func TestOfficialJuicityUDPUsesCommonAccounting(t *testing.T) {
 	limiter.Init()
 	port := reserveUDPPort(t)

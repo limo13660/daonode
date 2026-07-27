@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	forwardproxy "github.com/caddyserver/forwardproxy"
+	log "github.com/sirupsen/logrus"
 
 	panel "github.com/limo13660/daonode/api/v2board"
 )
@@ -47,9 +48,11 @@ func compileRoutePolicy(routes []panel.Route) (*routePolicy, []forwardproxy.ACLR
 			}
 			blocked = outbound == "block"
 		case "protocol":
-			return nil, nil, fmt.Errorf("route %d: protocol sniffing is not supported by the official Naive server", route.Id)
+			log.WithField("route_id", route.Id).Warn("Ignore protocol sniffing route unsupported by the official Naive server")
+			continue
 		case "dns":
-			return nil, nil, fmt.Errorf("route %d: custom DNS routes are not supported by the official Naive server", route.Id)
+			log.WithField("route_id", route.Id).Warn("Ignore custom DNS route unsupported by the official Naive server")
+			continue
 		default:
 			return nil, nil, fmt.Errorf("route %d: unsupported action %q", route.Id, route.Action)
 		}

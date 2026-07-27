@@ -154,8 +154,15 @@ func TestCompileOfficialNaiveRoutes(t *testing.T) {
 	if _, _, err := compileRoutePolicy([]panel.Route{{Id: 9, Action: "block_port", Match: []string{"invalid"}}}); err == nil {
 		t.Fatal("compileRoutePolicy() accepted invalid port")
 	}
-	if _, _, err := compileRoutePolicy([]panel.Route{{Id: 10, Action: "dns"}}); err == nil {
-		t.Fatal("compileRoutePolicy() accepted unsupported custom DNS route")
+	ignored, ignoredACL, err := compileRoutePolicy([]panel.Route{
+		{Id: 10, Action: "dns"},
+		{Id: 11, Action: "protocol", Match: []string{"bittorrent"}},
+	})
+	if err != nil {
+		t.Fatalf("compileRoutePolicy() rejected ignorable routes: %v", err)
+	}
+	if ignored.blockAll || len(ignored.domains) != 0 || len(ignored.ports) != 0 || len(ignoredACL) != 1 || !ignoredACL[0].Allow {
+		t.Fatalf("ignored route policy = %#v, ACL = %#v", ignored, ignoredACL)
 	}
 }
 
