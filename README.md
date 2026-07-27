@@ -1,19 +1,21 @@
 # daonode
 
-daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的独立节点后端。目前提供 Mieru 与 NaiveProxy 两条运行链路，不包含 V2Ray、Xray、Hysteria 等其他协议运行时。
+daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的独立节点后端。目前提供 Mieru、NaiveProxy 与 Juicity 三条运行链路，不包含 V2Ray、Xray、Hysteria 等其他协议运行时。
 
-当前代码对齐 Mieru `v3.34.1` 与 sing-box `v1.13.14`。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手与加密传输分别由 Mieru 官方 Go Server API 和 sing-box 官方运行时处理。
+当前代码对齐 Mieru `v3.34.1`、NaiveProxy 官方指定的 `klzgrad/forwardproxy@naive` 提交 `d62c80d`、Caddy `v2.11.4` 与 Juicity `v0.5.0`。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手、加密传输和 Naive padding 由对应官方内核处理。
 
 | 面板协议 | daonode 内核 | 当前状态 |
 |---|---|---|
 | Mieru | `mieru` | 可用，支持 TCP/UDP、多端口、Traffic Pattern 与 User Hint |
-| NaiveProxy | `singbox` | 可用，支持 TCP/QUIC、TLS 证书、ECH、QUIC 拥塞控制与 UDP over TCP |
+| NaiveProxy | `naive` | 可用，支持 TCP HTTP/2、QUIC HTTP/3、TLS 证书、ECH 与用户热更新 |
+| Juicity | `juicity` | 可用，支持 QUIC、TCP/UDP 转发、TLS 1.3、ECH、用户热更新与连接撤销 |
 
 ## 功能
 
 - Mieru TCP、UDP 和混合端口绑定
-- NaiveProxy TCP/QUIC 入站与 sing-box 运行时
-- NaiveProxy TLS 证书模式、ECH、QUIC 拥塞控制和 UDP over TCP
+- NaiveProxy TCP/QUIC 入站与官方 padding-enabled forwardproxy
+- NaiveProxy TLS 证书模式、ECH、HTTP/2 和 HTTP/3
+- Juicity 官方 QUIC 服务端、TCP/UDP 转发、TLS 1.3 与 ECH
 - 官方 SOCKS5 代理请求，支持 TCP CONNECT 和 UDP ASSOCIATE
 - IPv4、IPv6、多用户和动态用户同步
 - 单端口、多端口和连续端口范围
@@ -22,23 +24,23 @@ daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的
 - Mieru User Hint（可选强制校验，默认兼容旧客户端）
 - 用户动态增删、限速、在线状态和流量上报
 - 用户到期、续费、流量重置和套餐限制变更使用单一监控任务，并按面板配置的轮询周期同步
-- DaoBoard 路由组、DNS 规则、域名/IP/端口/协议阻断
+- Mieru 的完整 DaoBoard 路由组与 DNS 规则；Naive/Juicity 的域名/IP/端口阻断及 direct/block 出站
 - 兼容 v2node 的 `geoip.dat`、`geosite.dat` 路由数据格式
 - 配置热更新和安全退出
 - Linux TCP BBR 与 UDP socket 缓冲优化
 - 仅发布 Linux 构建（amd64、386、arm/arm64、riscv64、MIPS、PPC64、s390x）
 
-Mieru 本身不使用 TLS 证书；NaiveProxy 使用 DaoBoard 下发的 TLS 与证书设置。`self`、`http`、`dns`、`file` 和仅限 TCP 中继的 `none` 模式由 daonode 统一解析，再交给 sing-box 运行时。
+Mieru 本身不使用 TLS 证书；NaiveProxy 与 Juicity 使用 DaoBoard 下发的 TLS 与证书设置。`self`、`http`、`dns`、`file` 和仅限 Naive TCP 明文中继的 `none` 模式由 daonode 统一解析。Naive HTTP/3 与 Juicity 必须配置 TLS 证书，Juicity 固定使用 UDP 监听和 TLS 1.3。
 
 ## 工作流程
 
 ```text
-客户端（Mieru / NaiveProxy / YSBL-Client）
+客户端（Mieru / NaiveProxy / Juicity / YSBL-Client）
                        |
                        v
                   daonode
                   /     \
-        Mieru 官方 API   sing-box Naive 入站
+    Mieru 官方 API / 官方 forwardproxy / Juicity 官方协议
                   \     /
                    目标网站
 
@@ -47,22 +49,27 @@ DaoBoard <-> 节点配置、用户、路由、流量统计 <-> daonode
 
 ## 内核文件
 
-daonode 不复制 Mieru 源码，而是通过 Go module 直接链接官方 `github.com/enfein/mieru/v3`。当前锁定版本为 `v3.34.1`；Mieru 源码位于本机 Go module cache，不在本仓库内。
+daonode 通过 Go module 链接官方 Mieru API、NaiveProxy 文档指定的 `klzgrad/forwardproxy@naive` 和 Juicity `v0.5.0` 协议依赖。Juicity 适配层保留官方帧格式和 QUIC 行为，只补充上游服务端缺少的可关闭生命周期、热用户快照以及 DaoNode 公共流量会话。依赖版本与上游替换规则统一锁定在 `go.mod`。
 
 | 文件 | 内核适配职责 |
 |---|---|
-| `go.mod`、`go.sum` | 锁定 Mieru 版本和校验值 |
+| `go.mod`、`go.sum` | 锁定 Mieru、Caddy、官方 Naive forwardproxy 与 Juicity 版本和校验值 |
 | `core/core.go` | 根据面板下发的 `kernel` 与 `protocol` 校验能力并创建对应内核运行时 |
 | `core/contract/runtime.go` | 所有内核统一实现的生命周期、用户同步和流量统计接口 |
-| `core/shared/runtime.go` | 所有内核共用的累计流量差量、上报提交、限速、设备限制、在线连接跟踪和删用户连接清理 |
-| `core/mieru/runtime.go` | Mieru Server API、TCP/UDP 监听、端口绑定、认证用户同步、Traffic Pattern、User Hint、SOCKS5 TCP/UDP 转发和原始累计计数读取 |
-| `api/v2board/node.go` | 解析 DaoBoard 通用配置，并分别校验 Mieru 与 NaiveProxy 的传输、TLS 和协议设置 |
+| `core/shared/runtime.go` | 所有内核共用的用户索引、流量计数、上报提交、限速、设备限制、在线连接跟踪和删用户连接清理 |
+| `core/mieru/runtime.go` | Mieru Server API、TCP/UDP 监听、端口绑定、认证用户同步、Traffic Pattern、User Hint 和 SOCKS5 TCP/UDP 转发 |
+| `api/v2board/node.go` | 解析 DaoBoard 通用配置，并分别校验 Mieru、NaiveProxy 与 Juicity 的传输、TLS 和协议设置 |
 | `node/controller.go` | 节点生命周期、配置热更新、拉取用户、上报在线状态和流量 |
 | `node/node.go`、`node/user.go` | 节点运行循环和用户增删同步 |
 | `core/mieru/route.go` | Mieru 请求的 TCP、UDP 路由、DNS 解析和规则匹配 |
 | `core/mieru/geodata.go` | `geoip.dat`、`geosite.dat` 读取及 `geoip:private` 内置规则 |
-| `core/singbox/runtime.go` | sing-box NaiveProxy 入站、TLS/ECH、用户热同步、连接跟踪和原始累计计数读取 |
-| `core/singbox/route.go` | 将 DaoBoard 路由组转换为 sing-box DNS 与路由规则 |
+| `core/naive/runtime.go` | 官方 Naive forwardproxy 生命周期与认证用户热同步 |
+| `core/naive/server.go` | HTTP/2、HTTP/3、TLS、ECH 监听与关闭控制 |
+| `core/naive/handler.go` | 官方 handler 接入公共限速、设备限制、连接跟踪和流量计数 |
+| `core/naive/route.go` | 将 Naive 可支持的 DaoBoard 阻断规则转换为官方 forwardproxy ACL |
+| `core/juicity/runtime.go` | Juicity 生命周期、UUID 凭据快照与用户热同步 |
+| `core/juicity/server.go` | 官方 Juicity QUIC/认证/转发格式、TLS、ECH 与公共流量会话接入 |
+| `core/juicity/underlay.go` | 官方 Juicity UDP underlay 授权、端点生命周期和按用户计费 |
 | `.github/workflows/release.yml` | Linux 构建、打包 GeoIP/GeoSite 和发布包 |
 | `script/install.sh` | 安装二进制、配置、路由数据和 systemd 服务 |
 
@@ -74,7 +81,6 @@ github.com/enfein/mieru/v3/apis/model
 github.com/enfein/mieru/v3/apis/trafficpattern
 github.com/enfein/mieru/v3/pkg/appctl/appctlpb
 github.com/enfein/mieru/v3/pkg/sockopts
-github.com/enfein/mieru/v3/pkg/metrics
 ```
 
 ## 升级 Mieru 内核
@@ -109,7 +115,7 @@ github.com/enfein/mieru/v3/pkg/metrics
 
 每个新内核必须放在独立的 `core/<kernel>/` 目录，实现 `core/contract.Runtime`，并在根内核能力表中登记其支持的协议。不要只增加面板下拉选项；面板能力表、保存校验、配置下发、后端适配和运行验证必须一起完成。
 
-新内核应匿名嵌入 `core/shared.RuntimeServices`，只实现协议相关的启动停止、认证用户同步、连接处理和按 UID 读取原始累计流量。认证成功后统一调用 `OpenConnection`，用户事务成功后统一调用 `SyncUsers`；流量差量、失败重试、提交确认、计数器重置、限速、设备数和连接释放不应在各内核中重复实现。
+新内核应匿名嵌入 `core/shared.RuntimeServices`，只实现协议相关的启动停止、认证和用户同步。认证成功后将 `net.Conn` 交给 `OpenConnection`，非标准流或包协议交给 `OpenSession` 并调用其计数方法；用户事务成功后统一调用 `SyncUsers`。流量计数与差量、失败重试、提交确认、限速、设备数和连接释放不应在各内核中重复实现。
 
 ## 安装
 
@@ -342,11 +348,13 @@ make test GO=/path/to/go1.26.1/bin/go
 - [Mieru 服务端安装与 BBR](https://github.com/enfein/mieru/blob/v3.34.1/docs/server-install.zh_CN.md)
 - [Mieru 运维与速度排查](https://github.com/enfein/mieru/blob/v3.34.1/docs/operation.zh_CN.md)
 - [Mieru Traffic Pattern](https://github.com/enfein/mieru/blob/v3.34.1/docs/traffic-pattern.zh_CN.md)
-- [sing-box Naive 入站](https://sing-box.sagernet.org/configuration/inbound/naive/)
+- [NaiveProxy 官方服务端说明](https://github.com/klzgrad/naiveproxy#server-setup)
+- [Naive padding-enabled forwardproxy](https://github.com/klzgrad/forwardproxy/tree/naive)
+- [Juicity 官方项目](https://github.com/juicity/juicity/tree/v0.5.0)
 
 ## 许可证
 
-原有 daonode 代码保留 MPL-2.0 条款。由于发布的 daonode 二进制直接链接 GPL-3.0 许可的 Mieru，组合二进制发布时需要同时遵守 GPL-3.0。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 [LICENSE-GPL-3.0](LICENSE-GPL-3.0)。
+原有 daonode 代码保留 MPL-2.0 条款。由于发布的 daonode 二进制直接链接 GPL-3.0 许可的 Mieru，并包含 AGPL-3.0 许可的 Juicity 服务端适配，组合发布时需要同时遵守相应许可证。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、[LICENSE-GPL-3.0](LICENSE-GPL-3.0) 和 [LICENSE-AGPL-3.0](LICENSE-AGPL-3.0)。
 
 ## Stars
 

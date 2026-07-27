@@ -7,8 +7,9 @@ import (
 
 func TestKernelCapabilitiesContract(t *testing.T) {
 	want := []KernelCapability{
+		{Name: "juicity", Protocols: []string{"juicity"}},
 		{Name: "mieru", Protocols: []string{"mieru"}},
-		{Name: "singbox", Protocols: []string{"naive"}},
+		{Name: "naive", Protocols: []string{"naive"}},
 	}
 
 	if got := KernelCapabilities(); !reflect.DeepEqual(got, want) {
@@ -22,10 +23,13 @@ func TestKernelCapabilitiesContract(t *testing.T) {
 		want     bool
 	}{
 		{name: "mieru", kernel: "mieru", protocol: "mieru", want: true},
-		{name: "singbox naive", kernel: "singbox", protocol: "naive", want: true},
-		{name: "normalizes selection", kernel: " SINGBOX ", protocol: " NAIVE ", want: true},
+		{name: "juicity", kernel: "juicity", protocol: "juicity", want: true},
+		{name: "official naive", kernel: "naive", protocol: "naive", want: true},
+		{name: "normalizes selection", kernel: " NAIVE ", protocol: " NAIVE ", want: true},
 		{name: "rejects naive on mieru", kernel: "mieru", protocol: "naive", want: false},
-		{name: "rejects mieru on singbox", kernel: "singbox", protocol: "mieru", want: false},
+		{name: "rejects mieru on naive", kernel: "naive", protocol: "mieru", want: false},
+		{name: "rejects juicity on naive", kernel: "naive", protocol: "juicity", want: false},
+		{name: "rejects removed singbox kernel", kernel: "singbox", protocol: "naive", want: false},
 		{name: "rejects unknown kernel", kernel: "unknown", protocol: "naive", want: false},
 	}
 	for _, tt := range tests {

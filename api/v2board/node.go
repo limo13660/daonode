@@ -209,7 +209,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		if certMode == "" {
 			return nil, fmt.Errorf("NaiveProxy certificate mode is empty")
 		}
-		if !isSupportedNaiveCertMode(certMode) {
+		if !isSupportedTLSCertMode(certMode) {
 			return nil, fmt.Errorf("unsupported NaiveProxy certificate mode: %s", certMode)
 		}
 		if common.Tls != Tls {
@@ -220,6 +220,38 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		}
 		if certMode == "none" && common.TransportProtocol != "TCP" {
 			return nil, fmt.Errorf("NaiveProxy without a certificate only supports TCP relay nodes")
+		}
+	}
+	if common.Protocol == "juicity" {
+		if common.TransportProtocol == "" {
+			common.TransportProtocol = "UDP"
+		}
+		common.TransportProtocol = strings.ToUpper(common.TransportProtocol)
+		if common.TransportProtocol != "UDP" {
+			return nil, fmt.Errorf("Juicity transport protocol must be UDP")
+		}
+		certMode := strings.ToLower(strings.TrimSpace(common.TlsSettings.CertMode))
+		if certMode == "" {
+			return nil, fmt.Errorf("Juicity certificate mode is empty")
+		}
+		if !isSupportedTLSCertMode(certMode) || certMode == "none" {
+			return nil, fmt.Errorf("unsupported Juicity certificate mode: %s", certMode)
+		}
+		if common.Tls != Tls {
+			return nil, fmt.Errorf("Juicity requires TLS")
+		}
+		if common.TlsSettings.PrimaryServerName() == "" {
+			return nil, fmt.Errorf("Juicity TLS server name is empty")
+		}
+		congestion := strings.ToLower(strings.TrimSpace(common.ProtocolSettings.QUICCongestionControl))
+		if congestion == "" {
+			congestion = "bbr"
+		}
+		switch congestion {
+		case "bbr", "cubic", "new_reno":
+			common.ProtocolSettings.QUICCongestionControl = congestion
+		default:
+			return nil, fmt.Errorf("unsupported Juicity congestion control: %s", congestion)
 		}
 	}
 	if common.BaseConfig == nil {
@@ -438,7 +470,7 @@ func isEnvironmentVariableName(value string) bool {
 	return true
 }
 
-func isSupportedNaiveCertMode(value string) bool {
+func isSupportedTLSCertMode(value string) bool {
 	switch value {
 	case "self", "http", "dns", "file", "none":
 		return true

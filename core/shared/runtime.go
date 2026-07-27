@@ -1,14 +1,15 @@
 // Package shared contains runtime services that are independent of a
-// protocol kernel. Kernel adapters provide authentication and cumulative
-// traffic counters, then delegate connection policy and traffic reporting to
-// RuntimeServices.
+// protocol kernel. Kernel adapters authenticate users and hand accepted
+// streams or sessions to RuntimeServices; policy, accounting and reporting
+// remain identical for every protocol.
 package shared
 
 import (
-	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/common/format"
@@ -16,15 +17,20 @@ import (
 	"github.com/limo13660/daonode/limiter"
 )
 
-// TrafficTotal is a kernel's cumulative traffic counter for one user.
+// TrafficTotal is the cumulative traffic counter for one user.
 type TrafficTotal struct {
 	Upload   int64
 	Download int64
 }
 
-// CounterSource returns the latest cumulative traffic counter for a user.
-// Counters may reset when an upstream kernel resets its metrics.
-type CounterSource func(uid int) (TrafficTotal, error)
+type trafficCounter struct {
+	upload   atomic.Int64
+	download atomic.Int64
+}
+
+func (c *trafficCounter) total() TrafficTotal {
+	return TrafficTotal{Upload: c.upload.Load(), Download: c.download.Load()}
+}
 
 type trafficKey struct {
 	tag string
@@ -37,31 +43,33 @@ type pendingTraffic struct {
 }
 
 // committedTraffic survives an in-process runtime reload. Without this
-// process-wide baseline, a replacement runtime would report the kernel's
-// existing cumulative counters again.
+// process-wide baseline, a replacement runtime could report old cumulative
+// counters again.
 var committedTraffic sync.Map // trafficKey -> TrafficTotal
 
-// RuntimeServices implements traffic reporting, rate limiting, device limits
-// and active connection tracking for all protocol kernels.
+// RuntimeServices implements user lookup, traffic reporting, rate limiting,
+// device limits and active connection tracking for all protocol kernels.
 type RuntimeServices struct {
-	tag    string
-	source CounterSource
+	tag string
 
 	mu           sync.Mutex
 	users        map[int]panel.UserInfo
+	usersByUUID  map[string]int
+	counters     map[int]*trafficCounter
 	pending      map[int]pendingTraffic
-	connections  map[int]map[io.Closer]struct{}
+	connections  map[int]map[*Session]struct{}
 	trafficUsers map[int]struct{}
 }
 
 // NewRuntimeServices creates the common services for one node runtime.
-func NewRuntimeServices(tag string, source CounterSource) *RuntimeServices {
+func NewRuntimeServices(tag string) *RuntimeServices {
 	return &RuntimeServices{
 		tag:          tag,
-		source:       source,
 		users:        make(map[int]panel.UserInfo),
+		usersByUUID:  make(map[string]int),
+		counters:     make(map[int]*trafficCounter),
 		pending:      make(map[int]pendingTraffic),
-		connections:  make(map[int]map[io.Closer]struct{}),
+		connections:  make(map[int]map[*Session]struct{}),
 		trafficUsers: make(map[int]struct{}),
 	}
 }
@@ -69,66 +77,105 @@ func NewRuntimeServices(tag string, source CounterSource) *RuntimeServices {
 // SyncUsers updates the users accepted by the common connection policy. It
 // must be called only after the kernel has applied the same user transaction.
 func (s *RuntimeServices) SyncUsers(deleted, added []panel.UserInfo) {
-	connections := make([]io.Closer, 0)
+	connections := make([]*Session, 0)
 
 	s.mu.Lock()
 	for _, user := range deleted {
+		current, ok := s.users[user.Id]
+		if ok {
+			delete(s.usersByUUID, normalizedUUID(current.Uuid))
+		}
 		delete(s.users, user.Id)
 		s.trafficUsers[user.Id] = struct{}{}
-		for conn := range s.connections[user.Id] {
-			connections = append(connections, conn)
+		for session := range s.connections[user.Id] {
+			connections = append(connections, session)
 		}
 		delete(s.connections, user.Id)
 	}
 	for _, user := range added {
+		if previous, ok := s.users[user.Id]; ok && previous.Uuid != user.Uuid {
+			delete(s.usersByUUID, normalizedUUID(previous.Uuid))
+		}
 		s.users[user.Id] = user
+		s.usersByUUID[normalizedUUID(user.Uuid)] = user.Id
+		s.counterLocked(user.Id)
 		// Seed the candidate set so an in-process runtime reload can recover
 		// traffic accumulated before the replacement runtime was created.
 		s.trafficUsers[user.Id] = struct{}{}
 	}
 	s.mu.Unlock()
 
-	closeConnections(connections)
+	closeSessions(connections)
 }
 
-// OpenConnection applies the node and user limits, tracks the connection and
-// returns a rate-limited stream when a speed limit is configured. The release
-// callback is idempotent and must be called when the kernel finishes serving
-// the connection.
+// UserByID returns a current panel user.
+func (s *RuntimeServices) UserByID(uid int) (panel.UserInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[uid]
+	return user, ok
+}
+
+// UserByUUID returns a current panel user by the credential used by UUID-based
+// kernels such as Juicity.
+func (s *RuntimeServices) UserByUUID(uuid string) (panel.UserInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	uid, ok := s.usersByUUID[normalizedUUID(uuid)]
+	if !ok {
+		return panel.UserInfo{}, false
+	}
+	user, ok := s.users[uid]
+	return user, ok && normalizedUUID(user.Uuid) == normalizedUUID(uuid)
+}
+
+func normalizedUUID(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// OpenConnection applies all common policy and returns a stream that counts
+// client-to-server reads as upload and server-to-client writes as download.
+// Closing either the returned stream or its Session releases the device slot.
+// The release callback remains available for kernels whose upstream closes
+// the original connection directly.
 func (s *RuntimeServices) OpenConnection(user panel.UserInfo, conn net.Conn, trackDevice bool) (net.Conn, func(), bool) {
 	if conn == nil {
 		return nil, nil, false
 	}
-	bucket, release, accepted := s.openSession(user, conn, remoteIP(conn.RemoteAddr()), trackDevice)
+	session, accepted := s.openSession(user, conn, remoteIP(conn.RemoteAddr()), trackDevice)
 	if !accepted {
 		return nil, nil, false
 	}
-	if bucket != nil {
-		conn = rate.NewConnRateLimiter(conn, bucket)
+	stream := net.Conn(conn)
+	if session.bucket != nil {
+		stream = rate.NewConnRateLimiter(stream, session.bucket)
 	}
-	return conn, release, true
+	return &accountedConn{Conn: stream, session: session}, session.Release, true
 }
 
-// OpenPacketConnection applies the same user, device and speed policy as a
-// stream connection. Packet kernels wrap the returned bucket around their
-// native PacketConn and call release when the packet session closes.
-func (s *RuntimeServices) OpenPacketConnection(user panel.UserInfo, conn io.Closer, sourceAddress string, trackDevice bool) (*rate.DynamicBucket, func(), bool) {
-	return s.openSession(user, conn, remoteIPString(sourceAddress), trackDevice)
+// OpenSession applies the same user, device and speed policy for kernels that
+// do not expose a net.Conn. The kernel records payload bytes on the returned
+// session and closes it when the protocol session ends.
+func (s *RuntimeServices) OpenSession(user panel.UserInfo, closer io.Closer, sourceAddress string, trackDevice bool) (*Session, bool) {
+	if closer == nil {
+		return nil, false
+	}
+	return s.openSession(user, closer, remoteIPString(sourceAddress), trackDevice)
 }
 
-func (s *RuntimeServices) openSession(user panel.UserInfo, conn io.Closer, ip string, trackDevice bool) (*rate.DynamicBucket, func(), bool) {
-	if conn == nil || !s.userIsCurrent(user) {
-		return nil, nil, false
+func (s *RuntimeServices) openSession(user panel.UserInfo, closer io.Closer, ip string, trackDevice bool) (*Session, bool) {
+	if !s.userIsCurrent(user) {
+		return nil, false
 	}
 
 	nodeLimiter, err := limiter.GetLimiter(s.tag)
 	if err != nil {
-		return nil, nil, false
+		return nil, false
 	}
 	userTag := format.UserTag(s.tag, user.Uuid)
 	bucket, reject := nodeLimiter.CheckLimit(userTag, ip, trackDevice)
 	if reject {
-		return nil, nil, false
+		return nil, false
 	}
 
 	s.mu.Lock()
@@ -138,54 +185,147 @@ func (s *RuntimeServices) openSession(user panel.UserInfo, conn io.Closer, ip st
 		if trackDevice {
 			nodeLimiter.ReleaseConnection(userTag, ip)
 		}
-		return nil, nil, false
+		return nil, false
+	}
+	session := &Session{
+		service:     s,
+		uid:         user.Id,
+		closer:      closer,
+		bucket:      bucket,
+		nodeLimiter: nodeLimiter,
+		userTag:     userTag,
+		ip:          ip,
+		trackDevice: trackDevice,
+		counter:     s.counterLocked(user.Id),
 	}
 	connections := s.connections[user.Id]
 	if connections == nil {
-		connections = make(map[io.Closer]struct{})
+		connections = make(map[*Session]struct{})
 		s.connections[user.Id] = connections
 	}
-	connections[conn] = struct{}{}
+	connections[session] = struct{}{}
 	s.trafficUsers[user.Id] = struct{}{}
 	s.mu.Unlock()
+	return session, true
+}
 
-	var once sync.Once
-	release := func() {
-		once.Do(func() {
-			s.mu.Lock()
-			connections := s.connections[user.Id]
-			delete(connections, conn)
-			if len(connections) == 0 {
-				delete(s.connections, user.Id)
-			}
-			s.mu.Unlock()
-			if trackDevice {
-				nodeLimiter.ReleaseConnection(userTag, ip)
-			}
-		})
+// Session is the common lifecycle and accounting handle for one authenticated
+// protocol session. It is safe to record traffic from concurrent goroutines.
+type Session struct {
+	service *RuntimeServices
+	uid     int
+	closer  io.Closer
+	bucket  *rate.DynamicBucket
+	counter *trafficCounter
+
+	nodeLimiter *limiter.Limiter
+	userTag     string
+	ip          string
+	trackDevice bool
+	releaseOnce sync.Once
+	closeOnce   sync.Once
+	closeErr    error
+}
+
+// RecordUpload adds client-to-server payload bytes.
+func (s *Session) RecordUpload(bytes int64) {
+	if s != nil && bytes > 0 {
+		s.counter.upload.Add(bytes)
 	}
-	return bucket, release, true
+}
+
+// RecordDownload adds server-to-client payload bytes.
+func (s *Session) RecordDownload(bytes int64) {
+	if s != nil && bytes > 0 {
+		s.counter.download.Add(bytes)
+	}
+}
+
+// WaitUpload applies the node speed limit before an upload operation.
+func (s *Session) WaitUpload(bytes int64) {
+	if s != nil && s.bucket != nil && bytes > 0 {
+		s.bucket.Get().Wait(bytes)
+	}
+}
+
+// WaitDownload applies the node speed limit before a download operation.
+func (s *Session) WaitDownload(bytes int64) {
+	if s != nil && s.bucket != nil && bytes > 0 {
+		s.bucket.Get().Wait(bytes)
+	}
+}
+
+// Release removes the session from connection and online-device tracking. It
+// is idempotent and does not close the protocol-owned resource.
+func (s *Session) Release() {
+	if s == nil {
+		return
+	}
+	s.releaseOnce.Do(func() {
+		s.service.mu.Lock()
+		connections := s.service.connections[s.uid]
+		delete(connections, s)
+		if len(connections) == 0 {
+			delete(s.service.connections, s.uid)
+		}
+		s.service.mu.Unlock()
+		if s.trackDevice {
+			s.nodeLimiter.ReleaseConnection(s.userTag, s.ip)
+		}
+	})
+}
+
+// Close closes the protocol-owned resource and releases common tracking.
+func (s *Session) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		s.closeErr = s.closer.Close()
+		s.Release()
+	})
+	return s.closeErr
+}
+
+type accountedConn struct {
+	net.Conn
+	session *Session
+}
+
+func (c *accountedConn) Read(buffer []byte) (int, error) {
+	n, err := c.Conn.Read(buffer)
+	c.session.RecordUpload(int64(n))
+	return n, err
+}
+
+func (c *accountedConn) Write(buffer []byte) (int, error) {
+	n, err := c.Conn.Write(buffer)
+	c.session.RecordDownload(int64(n))
+	return n, err
+}
+
+func (c *accountedConn) Close() error {
+	return c.session.Close()
 }
 
 // CloseUserConnections closes all tracked connections for one user without
 // holding the service lock while invoking a kernel or network callback.
 func (s *RuntimeServices) CloseUserConnections(uid int) {
-	connections := s.takeConnections(uid)
-	closeConnections(connections)
+	closeSessions(s.takeConnections(uid))
 }
 
 // CloseAllConnections closes all connections tracked by this runtime.
 func (s *RuntimeServices) CloseAllConnections() {
 	s.mu.Lock()
-	connections := make([]io.Closer, 0)
+	connections := make([]*Session, 0)
 	for uid, active := range s.connections {
-		for conn := range active {
-			connections = append(connections, conn)
+		for session := range active {
+			connections = append(connections, session)
 		}
 		delete(s.connections, uid)
 	}
 	s.mu.Unlock()
-	closeConnections(connections)
+	closeSessions(connections)
 }
 
 // Traffic returns uncommitted traffic above the requested threshold. Removed
@@ -200,10 +340,11 @@ func (s *RuntimeServices) Traffic(minTraffic int) ([]panel.UserTraffic, error) {
 	}
 	result := make([]panel.UserTraffic, 0, len(s.trafficUsers))
 	for uid := range s.trafficUsers {
-		current, err := s.loadTraffic(uid)
-		if err != nil {
-			return nil, fmt.Errorf("load traffic for user %d: %w", uid, err)
+		counter := s.counters[uid]
+		if counter == nil {
+			continue
 		}
+		current := counter.total()
 		committedValue, _ := committedTraffic.LoadOrStore(trafficKey{tag: s.tag, uid: uid}, TrafficTotal{})
 		committed := committedValue.(TrafficTotal)
 		upload := trafficDelta(current.Upload, committed.Upload)
@@ -251,6 +392,37 @@ func (s *RuntimeServices) CommitTraffic(traffic []panel.UserTraffic) {
 	}
 }
 
+// RecordUpload adds traffic outside an opened Session. Protocol adapters
+// should prefer Session.RecordUpload so active-user tracking remains exact.
+func (s *RuntimeServices) RecordUpload(uid int, bytes int64) bool {
+	return s.record(uid, bytes, true)
+}
+
+// RecordDownload adds traffic outside an opened Session.
+func (s *RuntimeServices) RecordDownload(uid int, bytes int64) bool {
+	return s.record(uid, bytes, false)
+}
+
+func (s *RuntimeServices) record(uid int, bytes int64, upload bool) bool {
+	if bytes <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	if _, ok := s.users[uid]; !ok {
+		s.mu.Unlock()
+		return false
+	}
+	counter := s.counterLocked(uid)
+	s.trafficUsers[uid] = struct{}{}
+	s.mu.Unlock()
+	if upload {
+		counter.upload.Add(bytes)
+	} else {
+		counter.download.Add(bytes)
+	}
+	return true
+}
+
 func (s *RuntimeServices) userIsCurrent(user panel.UserInfo) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -258,23 +430,25 @@ func (s *RuntimeServices) userIsCurrent(user panel.UserInfo) bool {
 	return ok && current.Uuid == user.Uuid
 }
 
-func (s *RuntimeServices) takeConnections(uid int) []io.Closer {
+func (s *RuntimeServices) counterLocked(uid int) *trafficCounter {
+	counter := s.counters[uid]
+	if counter == nil {
+		counter = &trafficCounter{}
+		s.counters[uid] = counter
+	}
+	return counter
+}
+
+func (s *RuntimeServices) takeConnections(uid int) []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	active := s.connections[uid]
-	connections := make([]io.Closer, 0, len(active))
-	for conn := range active {
-		connections = append(connections, conn)
+	connections := make([]*Session, 0, len(active))
+	for session := range active {
+		connections = append(connections, session)
 	}
 	delete(s.connections, uid)
 	return connections
-}
-
-func (s *RuntimeServices) loadTraffic(uid int) (TrafficTotal, error) {
-	if s.source == nil {
-		return TrafficTotal{}, nil
-	}
-	return s.source(uid)
 }
 
 func trafficDelta(current, committed int64) int64 {
@@ -287,9 +461,9 @@ func trafficDelta(current, committed int64) int64 {
 	return current - committed
 }
 
-func closeConnections(connections []io.Closer) {
-	for _, conn := range connections {
-		_ = conn.Close()
+func closeSessions(sessions []*Session) {
+	for _, session := range sessions {
+		_ = session.Close()
 	}
 }
 
@@ -311,3 +485,6 @@ func remoteIPString(address string) string {
 	}
 	return host
 }
+
+var _ net.Conn = (*accountedConn)(nil)
+var _ io.Closer = (*Session)(nil)

@@ -31,7 +31,7 @@ func TestGetNodeInfoNaiveECHContract(t *testing.T) {
 		w.Header().Set("ETag", `"contract-etag"`)
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"protocol":           "naive",
-			"kernel":             "singbox",
+			"kernel":             "naive",
 			"panel_identifier":   "ysbl-panel",
 			"username_prefix":    "ysbl-panel",
 			"listen_ip":          "::",
@@ -78,8 +78,8 @@ func TestGetNodeInfoNaiveECHContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNodeInfo() error = %v", err)
 	}
-	if info.Type != "naive" || info.Kernel != "singbox" {
-		t.Fatalf("node selection = %s/%s, want naive/singbox", info.Type, info.Kernel)
+	if info.Type != "naive" || info.Kernel != "naive" {
+		t.Fatalf("node selection = %s/%s, want naive/naive", info.Type, info.Kernel)
 	}
 	if info.Security != Tls || info.Common.TransportProtocol != "UDP" {
 		t.Fatalf("Naive transport contract was not preserved: %#v", info.Common)
@@ -111,5 +111,48 @@ func TestGetNodeInfoNaiveECHContract(t *testing.T) {
 	}
 	if unchanged != nil {
 		t.Fatalf("GetNodeInfo() with matching ETag = %#v, want nil", unchanged)
+	}
+}
+
+func TestGetNodeInfoJuicityContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"protocol":           "juicity",
+			"kernel":             "juicity",
+			"listen_ip":          "0.0.0.0",
+			"server_port":        443,
+			"transport_protocol": "UDP",
+			"tls":                1,
+			"tls_settings": map[string]any{
+				"server_name": "edge.juicity.example",
+				"cert_mode":   "self",
+			},
+			"protocol_settings": map[string]any{
+				"quic_congestion_control": "CUBIC",
+			},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 9, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+	if info.Type != "juicity" || info.Kernel != "juicity" || info.Common.TransportProtocol != "UDP" {
+		t.Fatalf("Juicity selection = %#v", info)
+	}
+	if info.Common.ProtocolSettings.QUICCongestionControl != "cubic" {
+		t.Fatalf("Juicity congestion = %q, want cubic", info.Common.ProtocolSettings.QUICCongestionControl)
+	}
+	if info.Common.CertInfo == nil || info.Common.CertInfo.CertMode != "self" {
+		t.Fatalf("Juicity certificate = %#v", info.Common.CertInfo)
 	}
 }

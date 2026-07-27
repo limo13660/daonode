@@ -20,12 +20,12 @@ func TestSnapshotIsIndependentAndRestorable(t *testing.T) {
 	info := &panel.NodeInfo{
 		Id:       7,
 		Type:     "naive",
-		Kernel:   "singbox",
+		Kernel:   "naive",
 		Security: panel.Tls,
 		Tag:      "node-7",
 		Common: &panel.CommonNode{
 			Protocol:   "naive",
-			Kernel:     "singbox",
+			Kernel:     "naive",
 			ServerPort: 443,
 			Routes: []panel.Route{{
 				Id:          1,

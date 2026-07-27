@@ -9,8 +9,9 @@ import (
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/conf"
 	"github.com/limo13660/daonode/core/contract"
+	"github.com/limo13660/daonode/core/juicity"
 	"github.com/limo13660/daonode/core/mieru"
-	coreSingBox "github.com/limo13660/daonode/core/singbox"
+	"github.com/limo13660/daonode/core/naive"
 )
 
 // ErrRuntimeStopTimeout is kept at the root package for callers that do not
@@ -38,9 +39,13 @@ var kernelDefinitions = map[string]kernelDefinition{
 		protocols:  map[string]struct{}{"mieru": {}},
 		newRuntime: mieru.NewRuntime,
 	},
-	"singbox": {
+	"juicity": {
+		protocols:  map[string]struct{}{"juicity": {}},
+		newRuntime: juicity.NewRuntime,
+	},
+	"naive": {
 		protocols:  map[string]struct{}{"naive": {}},
-		newRuntime: coreSingBox.NewRuntime,
+		newRuntime: naive.NewRuntime,
 	},
 }
 

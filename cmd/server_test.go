@@ -168,7 +168,7 @@ func newNaivePanelWithRoutes(t *testing.T, port int, routes []map[string]any) *h
 		case "/api/v2/server/config":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocol":           "naive",
-				"kernel":             "singbox",
+				"kernel":             "naive",
 				"listen_ip":          "127.0.0.1",
 				"server_port":        port,
 				"transport_protocol": "TCP",

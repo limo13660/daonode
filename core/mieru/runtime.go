@@ -20,7 +20,6 @@ import (
 	"github.com/enfein/mieru/v3/apis/trafficpattern"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	mierucommon "github.com/enfein/mieru/v3/pkg/common"
-	"github.com/enfein/mieru/v3/pkg/metrics"
 	"github.com/enfein/mieru/v3/pkg/sockopts"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -156,7 +155,7 @@ func NewRuntime(tag string, info *panel.NodeInfo) contract.Runtime {
 		users:       make(map[int]panel.UserInfo),
 		credentials: make(map[int]string),
 	}
-	runtime.RuntimeServices = shared.NewRuntimeServices(tag, runtime.loadTraffic)
+	runtime.RuntimeServices = shared.NewRuntimeServices(tag)
 	return runtime
 }
 
@@ -684,20 +683,6 @@ func (m *mieruRuntime) routerSnapshot() *routeEngine {
 		return &routeEngine{}
 	}
 	return m.router
-}
-
-func (m *mieruRuntime) loadTraffic(uid int) (shared.TrafficTotal, error) {
-	var total shared.TrafficTotal
-	userName := m.userName(uid)
-	for _, metric := range metrics.GetMetricsForUser(userName) {
-		switch metric.Name() {
-		case metrics.UserMetricUploadBytes:
-			total.Upload = metric.Load()
-		case metrics.UserMetricDownloadBytes:
-			total.Download = metric.Load()
-		}
-	}
-	return total, nil
 }
 
 func mieruTransport(value string) (*appctlpb.TransportProtocol, error) {
