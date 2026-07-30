@@ -2,6 +2,30 @@
 
 daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的独立节点后端。目前提供 Mieru、NaiveProxy 与 Juicity 三条运行链路，不包含 V2Ray、Xray、Hysteria 等其他协议运行时。
 
+## 慢速服务器安装
+
+安装器会自动重试并支持断点续传，未完成的下载会保存在 `/var/cache/daonode`，重新执行安装时会继续下载。服务器直连 GitHub 时不需要设置任何代理变量。建议首次安装指定版本，避免额外请求 GitHub Releases API：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh) 3.0.0
+```
+
+只有执行安装的机器本身运行了代理时，才需要设置 `ALL_PROXY` 或 `HTTPS_PROXY`；例如代理确实运行在该服务器的 `127.0.0.1:6789` 端口时才使用：
+
+```bash
+export ALL_PROXY="http://127.0.0.1:6789"
+```
+
+也可以通过 `DAONODE_RELEASE_MIRRORS` 配置一个或多个发布包镜像，多个地址用逗号分隔。镜像地址可以是前缀，也可以使用 `%URL%` 占位符；安装器会在镜像失败后回退到官方 GitHub：
+
+```bash
+export DAONODE_RELEASE_MIRRORS="https://mirror.example/%URL%"
+```
+
+若连 raw 文件也较慢，可设置 `DAONODE_RAW_BASE_URL`；`DAONODE_API_URL` 可用于替换获取最新版信息的 API 地址。不要使用来源不明的镜像，镜像内容应与官方 Release 校验一致。
+
+默认不设置最低下载速度，和 v2node 的持续流式下载方式一致；如需允许极慢线路一直下载，可设置 `DAONODE_DOWNLOAD_MAX_TIME=0` 取消单个下载源的总超时。该参数只影响安装包下载，不影响系统包管理器。
+
 当前代码对齐 Mieru `v3.34.1`、NaiveProxy 官方指定的 `klzgrad/forwardproxy@naive` 提交 `d62c80d`、Caddy `v2.11.4` 与 Juicity `v0.5.0`。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手、加密传输和 Naive padding 由对应官方内核处理。
 
 | 面板协议 | daonode 内核 | 当前状态 |

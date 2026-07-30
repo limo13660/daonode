@@ -6,6 +6,7 @@ yellow='\033[0;33m'
 plain='\033[0m'
 
 cur_dir=$(pwd)
+DAONODE_RAW_BASE_URL="${DAONODE_RAW_BASE_URL:-https://raw.githubusercontent.com/limo13660/daonode/main}"
 
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
@@ -108,8 +109,8 @@ run_installer() {
     local status
 
     installer_tmp=$(mktemp /tmp/daonode-installer.XXXXXX) || return 1
-    if ! curl -fL --retry 2 --retry-max-time 120 --connect-timeout 15 --max-time 120 -sS \
-        -o "$installer_tmp" https://raw.githubusercontent.com/limo13660/daonode/main/script/install.sh; then
+    if ! curl -fL --retry 5 --retry-delay 3 --retry-max-time 600 --connect-timeout 20 --max-time 300 -sS \
+        -o "$installer_tmp" "${DAONODE_RAW_BASE_URL%/}/script/install.sh"; then
         rm -f "$installer_tmp"
         echo -e "${red}下载安装脚本失败，请检查本机能否连接 Github${plain}"
         return 1
@@ -322,7 +323,8 @@ show_log() {
 }
 
 update_shell() {
-    wget -O /usr/bin/daonode -N --no-check-certificate https://raw.githubusercontent.com/limo13660/daonode/main/script/daonode.sh
+    curl -fL --retry 5 --retry-delay 3 --retry-max-time 600 --connect-timeout 20 --max-time 300 \
+        -o /usr/bin/daonode "${DAONODE_RAW_BASE_URL%/}/script/daonode.sh"
     if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"

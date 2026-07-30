@@ -9,6 +9,12 @@ plain='\033[0m'
 
 cur_dir=$(pwd)
 
+# Optional download overrides for servers with slow or restricted access to
+# GitHub. A mirror may be a URL prefix or contain the %URL% placeholder.
+DAONODE_RAW_BASE_URL="${DAONODE_RAW_BASE_URL:-https://raw.githubusercontent.com/limo13660/daonode/main}"
+DAONODE_API_URL="${DAONODE_API_URL:-https://api.github.com/repos/limo13660/daonode/releases/latest}"
+DAONODE_RELEASE_MIRRORS="${DAONODE_RELEASE_MIRRORS:-}"
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -300,20 +306,39 @@ download_release() {
     local partial="${destination}.part"
     local source
     local downloaded=0
+    local max_time="${DAONODE_DOWNLOAD_MAX_TIME:-1800}"
     local curl_args=(
         -fL
-        --retry 0
-        --connect-timeout 15
-        --max-time 300
-        --speed-limit 1024
-        --speed-time 60
+        --retry 5
+        --retry-delay 3
+        --retry-max-time 600
+        --connect-timeout 20
+        --max-time "$max_time"
         --progress-bar
     )
-    local sources=("$url")
+    local sources=()
+    local mirror_list
+    local mirror
+    local mirror_url
 
-    rm -f "$partial"
-    echo -e "${yellow}安装包约 24 MiB，低速网络可能需要数分钟；下载最长等待 30 分钟。${plain}"
-    echo "Download timeout is 5 minutes; partial downloads resume automatically."
+    mirror_list="${DAONODE_RELEASE_MIRRORS//$'\n'/ }"
+    mirror_list="${mirror_list//,/ }"
+    for mirror in $mirror_list; do
+        if [[ "$mirror" == *"%URL%"* ]]; then
+            mirror_url="${mirror//%URL%/$url}"
+        else
+            mirror_url="${mirror%/}/$url"
+        fi
+        [[ "$mirror_url" != "$url" ]] && sources+=("$mirror_url")
+    done
+    sources+=("$url")
+
+    if [[ "$max_time" == "0" ]]; then
+        echo -e "${yellow}安装包约 24 MiB，正在持续下载；未设置总超时。${plain}"
+    else
+        echo -e "${yellow}安装包约 24 MiB，低速网络可能需要数分钟；单个下载源最长等待 ${max_time} 秒。${plain}"
+    fi
+    echo "Retries: 5; partial downloads are reused when switching sources."
     for source in "${sources[@]}"; do
         echo "Download source: $source"
         if [[ -s "$partial" ]]; then
@@ -340,7 +365,6 @@ download_release() {
         fi
     done
     if [[ $downloaded -ne 1 ]]; then
-        rm -f "$partial"
         return 1
     fi
     if [[ ! -s "$partial" ]]; then
@@ -357,16 +381,24 @@ install_daonode() {
     local archive
     local stage_dir
     local manager_tmp=""
+    local cache_dir="${DAONODE_DOWNLOAD_DIR:-/var/cache/daonode}"
+    local cache_version
 
-    archive=$(mktemp /tmp/daonode-linux.XXXXXX) || exit 1
+    cache_version="${version_param:-latest}"
+    cache_version=$(printf '%s' "$cache_version" | tr -c 'A-Za-z0-9._-' '_')
+    if ! mkdir -p "$cache_dir"; then
+        echo -e "${red}创建下载缓存目录失败：${cache_dir}${plain}"
+        exit 1
+    fi
+    archive="${cache_dir}/daonode-linux-${arch}-${cache_version}.zip"
     stage_dir=$(mktemp -d /usr/local/daonode.new.XXXXXX) || {
         rm -f "$archive"
         exit 1
     }
 
     if  [[ -z "$version_param" ]] ; then
-        last_version=$(curl -fsSL --retry 2 --retry-max-time 120 --connect-timeout 15 --max-time 60 \
-            "https://api.github.com/repos/limo13660/daonode/releases/latest" | \
+        last_version=$(curl -fsSL --retry 5 --retry-delay 3 --retry-max-time 600 --connect-timeout 20 --max-time 300 \
+            "$DAONODE_API_URL" | \
             grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             echo -e "${red}检测 daonode 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 daonode 版本安装${plain}"
@@ -537,8 +569,8 @@ EOF
 
 
     manager_tmp=$(mktemp /tmp/daonode-manager.XXXXXX) || true
-    if [[ -n "$manager_tmp" ]] && curl -fL --retry 2 --retry-max-time 120 --connect-timeout 15 --max-time 120 -sS \
-        -o "$manager_tmp" https://raw.githubusercontent.com/limo13660/daonode/main/script/daonode.sh; then
+    if [[ -n "$manager_tmp" ]] && curl -fL --retry 5 --retry-delay 3 --retry-max-time 600 --connect-timeout 20 --max-time 300 -sS \
+        -o "$manager_tmp" "${DAONODE_RAW_BASE_URL%/}/script/daonode.sh"; then
         install -m 0755 "$manager_tmp" /usr/bin/daonode
     else
         echo -e "${yellow}管理脚本更新失败，保留现有 /usr/bin/daonode${plain}"
