@@ -6,7 +6,7 @@ daonode embeds the Mieru server API from:
 
 - Project: https://github.com/enfein/mieru
 - Module: `github.com/enfein/mieru/v3`
-- Version: `v3.34.1`
+- Version: `v3.36.0`
 - License: GNU General Public License v3.0
 
 The GPL-3.0 license text is included in `LICENSE-GPL-3.0`.

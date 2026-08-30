@@ -7,7 +7,7 @@ require (
 	github.com/caddyserver/forwardproxy v0.0.0-00010101000000-000000000000
 	github.com/daeuniverse/outbound v0.0.0-20250219135309-c607702d1c85
 	github.com/daeuniverse/quic-go v0.0.0-20250210145620-2083199a7851
-	github.com/enfein/mieru/v3 v3.34.1
+	github.com/enfein/mieru/v3 v3.36.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-acme/lego/v4 v4.25.2
 	github.com/go-resty/resty/v2 v2.16.5

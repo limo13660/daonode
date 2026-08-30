@@ -26,7 +26,7 @@ export DAONODE_RELEASE_MIRRORS="https://mirror.example/%URL%"
 
 默认不设置最低下载速度，和 v2node 的持续流式下载方式一致；如需允许极慢线路一直下载，可设置 `DAONODE_DOWNLOAD_MAX_TIME=0` 取消单个下载源的总超时。该参数只影响安装包下载，不影响系统包管理器。
 
-当前代码对齐 Mieru `v3.34.1`、NaiveProxy 官方指定的 `klzgrad/forwardproxy@naive` 提交 `d62c80d`、Caddy `v2.11.4` 与 Juicity `v0.5.0`。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手、加密传输和 Naive padding 由对应官方内核处理。
+当前代码对齐 Mieru `v3.36.0`、NaiveProxy 官方指定的 `klzgrad/forwardproxy@naive` 提交 `d62c80d`、Caddy `v2.11.4` 与 Juicity `v0.5.0`。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手、加密传输和 Naive padding 由对应官方内核处理。Mieru `v3.36.0` 加快了新连接的用户匹配，并降低了加密内存分配和 GC 压力。
 
 | 面板协议 | daonode 内核 | 当前状态 |
 |---|---|---|
@@ -73,7 +73,7 @@ DaoBoard <-> 节点配置、用户、路由、流量统计 <-> daonode
 
 ## 内核文件
 
-daonode 通过 Go module 链接官方 Mieru API、NaiveProxy 文档指定的 `klzgrad/forwardproxy@naive` 和 Juicity `v0.5.0` 协议依赖。Juicity 适配层保留官方帧格式和 QUIC 行为，只补充上游服务端缺少的可关闭生命周期、热用户快照以及 DaoNode 公共流量会话。依赖版本与上游替换规则统一锁定在 `go.mod`。
+daonode 通过 Go module 链接官方 Mieru `v3.36.0` API、NaiveProxy 文档指定的 `klzgrad/forwardproxy@naive` 和 Juicity `v0.5.0` 协议依赖。Juicity 适配层保留官方帧格式和 QUIC 行为，只补充上游服务端缺少的可关闭生命周期、热用户快照以及 DaoNode 公共流量会话。依赖版本与上游替换规则统一锁定在 `go.mod`；截至 2026-08-30，Caddy `v2.11.4`、Juicity `v0.5.0` 和 forwardproxy `naive` 分支提交 `d62c80d` 均已是对应官方仓库的最新稳定版本/分支提交。
 
 | 文件 | 内核适配职责 |
 |---|---|
@@ -368,10 +368,10 @@ make test GO=/path/to/go1.26.1/bin/go
 
 ## 上游文档
 
-- [Mieru 协议说明](https://github.com/enfein/mieru/blob/v3.34.1/docs/protocol.zh_CN.md)
-- [Mieru 服务端安装与 BBR](https://github.com/enfein/mieru/blob/v3.34.1/docs/server-install.zh_CN.md)
-- [Mieru 运维与速度排查](https://github.com/enfein/mieru/blob/v3.34.1/docs/operation.zh_CN.md)
-- [Mieru Traffic Pattern](https://github.com/enfein/mieru/blob/v3.34.1/docs/traffic-pattern.zh_CN.md)
+- [Mieru 协议说明](https://github.com/enfein/mieru/blob/v3.36.0/docs/protocol.zh_CN.md)
+- [Mieru 服务端安装与 BBR](https://github.com/enfein/mieru/blob/v3.36.0/docs/server-install.zh_CN.md)
+- [Mieru 运维与速度排查](https://github.com/enfein/mieru/blob/v3.36.0/docs/operation.zh_CN.md)
+- [Mieru Traffic Pattern](https://github.com/enfein/mieru/blob/v3.36.0/docs/traffic-pattern.zh_CN.md)
 - [NaiveProxy 官方服务端说明](https://github.com/klzgrad/naiveproxy#server-setup)
 - [Naive padding-enabled forwardproxy](https://github.com/klzgrad/forwardproxy/tree/naive)
 - [Juicity 官方项目](https://github.com/juicity/juicity/tree/v0.5.0)
