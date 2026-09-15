@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -58,8 +59,212 @@ type CommonNode struct {
 }
 
 type ProtocolSettings struct {
-	QUICCongestionControl string `json:"quic_congestion_control"`
-	UDPOverTCP            bool   `json:"udp_over_tcp"`
+	QUICCongestionControl string   `json:"quic_congestion_control"`
+	UDPOverTCP            bool     `json:"udp_over_tcp"`
+	AEADMethod            string   `json:"aead_method"`
+	PaddingMin            int      `json:"padding_min"`
+	PaddingMax            int      `json:"padding_max"`
+	TableType             string   `json:"table_type"`
+	EnablePureDownlink    bool     `json:"enable_pure_downlink"`
+	HTTPMask              bool     `json:"http_mask"`
+	HTTPMaskMode          string   `json:"http_mask_mode"`
+	HTTPMaskTLS           bool     `json:"http_mask_tls"`
+	HTTPMaskHost          string   `json:"http_mask_host"`
+	PathRoot              string   `json:"path_root"`
+	Multiplex             string   `json:"multiplex"`
+	CustomTable           string   `json:"custom_table"`
+	CustomTables          []string `json:"custom_tables"`
+}
+
+// UnmarshalJSON keeps the panel contract tolerant of older DaoBoard exports
+// and of the names used by the official Sudoku/Mihomo configuration.  The
+// panel now emits the flat canonical fields, but daonode may run against an
+// older panel or a cached configuration while an installation is being
+// upgraded.  Normalising at this boundary ensures every kernel sees one
+// stable shape.
+func (p *ProtocolSettings) UnmarshalJSON(data []byte) error {
+	type plain ProtocolSettings
+	trimmed := bytes.TrimSpace(data)
+	// PHP's historical empty-array encoding (`[]`) is equivalent to an empty
+	// settings object for this field.  DaoBoard emits `{}` today, but accepting
+	// both avoids a needless node startup failure during upgrades.
+	if bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
+		trimmed = []byte("{}")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return err
+	}
+
+	setAlias := func(canonical string, aliases ...string) {
+		if value, exists := fields[canonical]; exists && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return
+		}
+		for _, alias := range aliases {
+			if value, exists := fields[alias]; exists {
+				fields[canonical] = value
+				return
+			}
+		}
+	}
+	setAlias("aead_method", "aead")
+	setAlias("table_type", "ascii")
+
+	// Older clients represented the HTTP camouflage settings as a nested
+	// object.  Accept both `disable` and `enabled`, while retaining precedence
+	// for an explicitly supplied canonical field.
+	if nested, ok := fields["httpmask"]; ok {
+		var httpMask map[string]json.RawMessage
+		if err := json.Unmarshal(nested, &httpMask); err == nil {
+			if value, exists := fields["http_mask"]; !exists || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				if value, exists := httpMask["enabled"]; exists {
+					fields["http_mask"] = value
+				} else if value, exists := httpMask["disable"]; exists {
+					if disabled, ok := decodeJSONBool(value); ok {
+						encoded, _ := json.Marshal(!disabled)
+						fields["http_mask"] = encoded
+					}
+				}
+			}
+			for _, mapping := range [][2]string{
+				{"mode", "http_mask_mode"}, {"tls", "http_mask_tls"}, {"host", "http_mask_host"},
+				{"path_root", "path_root"}, {"path", "path_root"}, {"multiplex", "multiplex"},
+			} {
+				from, to := mapping[0], mapping[1]
+				if value, exists := fields[to]; exists && !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					continue
+				}
+				if value, exists := httpMask[from]; exists {
+					fields[to] = value
+				}
+			}
+		}
+	}
+
+	// custom_tables was briefly serialised as a JSON string by older admin
+	// bundles.  Decode it when possible and silently use an empty list for a
+	// malformed legacy value, matching DaoBoard's canonicalisation behaviour.
+	if value, ok := fields["custom_tables"]; ok {
+		var encoded string
+		if json.Unmarshal(value, &encoded) == nil {
+			var tables []string
+			if json.Unmarshal([]byte(encoded), &tables) == nil {
+				normalized, _ := json.Marshal(tables)
+				fields["custom_tables"] = normalized
+			} else {
+				fields["custom_tables"] = json.RawMessage("[]")
+			}
+		}
+	}
+	for _, key := range []string{"udp_over_tcp", "enable_pure_downlink", "http_mask", "http_mask_tls"} {
+		if value, ok := fields[key]; ok {
+			if normalized, ok := decodeJSONBool(value); ok {
+				encoded, _ := json.Marshal(normalized)
+				fields[key] = encoded
+			}
+		}
+	}
+	for _, key := range []string{"padding_min", "padding_max"} {
+		if value, ok := fields[key]; ok {
+			var encoded string
+			if json.Unmarshal(value, &encoded) == nil {
+				if strings.TrimSpace(encoded) == "" {
+					fields[key] = json.RawMessage("null")
+					continue
+				}
+				number, err := strconv.Atoi(strings.TrimSpace(encoded))
+				if err != nil {
+					return fmt.Errorf("invalid Sudoku %s: %q", key, encoded)
+				}
+				fields[key] = json.RawMessage(strconv.Itoa(number))
+			}
+		}
+	}
+
+	// Apply the same defaults as DaoBoard when a legacy response omits the
+	// Sudoku block entirely or only includes a subset of fields.  Explicit
+	// zero/false values remain untouched because presence is checked above.
+	defaults := map[string]string{
+		"aead_method":          "\"chacha20-poly1305\"",
+		"padding_min":          "10",
+		"padding_max":          "30",
+		"table_type":           "\"prefer_ascii\"",
+		"enable_pure_downlink": "true",
+		"http_mask":            "true",
+		"http_mask_mode":       "\"legacy\"",
+		"http_mask_tls":        "false",
+		"multiplex":            "\"off\"",
+		"custom_tables":        "[]",
+	}
+	for key, defaultValue := range defaults {
+		if rawValue, exists := fields[key]; !exists || bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) {
+			fields[key] = json.RawMessage(defaultValue)
+		}
+	}
+
+	normalized, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	var decoded plain
+	if err := json.Unmarshal(normalized, &decoded); err != nil {
+		return err
+	}
+	decoded.AEADMethod = strings.ToLower(strings.TrimSpace(decoded.AEADMethod))
+	decoded.TableType = strings.ToLower(strings.TrimSpace(decoded.TableType))
+	if decoded.TableType == "prefer_numeric" {
+		decoded.TableType = "prefer_ascii"
+	} else if decoded.TableType == "custom" {
+		decoded.TableType = "prefer_entropy"
+	}
+	decoded.HTTPMaskMode = strings.ToLower(strings.TrimSpace(decoded.HTTPMaskMode))
+	if decoded.HTTPMaskMode == "split-stream" {
+		decoded.HTTPMaskMode = "stream"
+	}
+	decoded.Multiplex = strings.ToLower(strings.TrimSpace(decoded.Multiplex))
+	if decoded.Multiplex == "low" {
+		decoded.Multiplex = "auto"
+	} else if decoded.Multiplex == "high" {
+		decoded.Multiplex = "on"
+	}
+	decoded.HTTPMaskHost = strings.TrimSpace(decoded.HTTPMaskHost)
+	decoded.PathRoot = strings.Trim(decoded.PathRoot, " /\t\n\r\x00\v")
+	decoded.CustomTable = strings.TrimSpace(decoded.CustomTable)
+	cleanTables := decoded.CustomTables[:0]
+	for _, table := range decoded.CustomTables {
+		if table = strings.TrimSpace(table); table != "" {
+			cleanTables = append(cleanTables, table)
+		}
+	}
+	decoded.CustomTables = cleanTables
+	*p = ProtocolSettings(decoded)
+	return nil
+}
+
+func decodeJSONBool(value json.RawMessage) (bool, bool) {
+	if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return false, false
+	}
+	var b bool
+	if json.Unmarshal(value, &b) == nil {
+		return b, true
+	}
+	var n float64
+	if json.Unmarshal(value, &n) == nil {
+		return n != 0, true
+	}
+	var s string
+	if json.Unmarshal(value, &s) != nil {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "on", "yes", "y":
+		return true, true
+	case "0", "false", "off", "no", "n", "":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 type PortBinding struct {
@@ -141,6 +346,16 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	common := &CommonNode{}
 	if err := json.Unmarshal(response.Body(), common); err != nil {
 		return nil, fmt.Errorf("decode node params: %w", err)
+	}
+	// A missing protocol_settings object does not invoke
+	// ProtocolSettings.UnmarshalJSON.  Detect that legacy shape here so
+	// Sudoku still receives the same defaults as DaoBoard.
+	var envelope map[string]json.RawMessage
+	settingsPresent := false
+	if err := json.Unmarshal(response.Body(), &envelope); err == nil {
+		if raw, ok := envelope["protocol_settings"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			settingsPresent = true
+		}
 	}
 	common.Protocol = strings.ToLower(strings.TrimSpace(common.Protocol))
 	if common.Protocol == "" {
@@ -254,6 +469,50 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 			return nil, fmt.Errorf("unsupported Juicity congestion control: %s", congestion)
 		}
 	}
+	if common.Protocol == "sudoku" {
+		if !settingsPresent {
+			common.ProtocolSettings = ProtocolSettings{
+				AEADMethod:         "chacha20-poly1305",
+				PaddingMin:         10,
+				PaddingMax:         30,
+				TableType:          "prefer_ascii",
+				EnablePureDownlink: true,
+				HTTPMask:           true,
+				HTTPMaskMode:       "legacy",
+				HTTPMaskTLS:        false,
+				Multiplex:          "off",
+				CustomTables:       []string{},
+			}
+		}
+		if common.TransportProtocol == "" {
+			common.TransportProtocol = "TCP"
+		}
+		common.TransportProtocol = strings.ToUpper(common.TransportProtocol)
+		if common.TransportProtocol != "TCP" {
+			return nil, fmt.Errorf("Sudoku transport protocol must be TCP")
+		}
+		if common.ProtocolSettings.AEADMethod == "" {
+			common.ProtocolSettings.AEADMethod = "chacha20-poly1305"
+		}
+		if strings.TrimSpace(common.ProtocolSettings.TableType) == "" {
+			common.ProtocolSettings.TableType = "prefer_ascii"
+		}
+		if strings.TrimSpace(common.ProtocolSettings.HTTPMaskMode) == "" {
+			common.ProtocolSettings.HTTPMaskMode = "legacy"
+		}
+		if strings.TrimSpace(common.ProtocolSettings.Multiplex) == "" {
+			common.ProtocolSettings.Multiplex = "off"
+		}
+		if common.ProtocolSettings.PaddingMin < 0 || common.ProtocolSettings.PaddingMin > 100 {
+			return nil, fmt.Errorf("invalid Sudoku padding_min")
+		}
+		if common.ProtocolSettings.PaddingMax < common.ProtocolSettings.PaddingMin || common.ProtocolSettings.PaddingMax > 100 {
+			return nil, fmt.Errorf("invalid Sudoku padding_max")
+		}
+		if err := validateSudokuProtocolSettings(&common.ProtocolSettings); err != nil {
+			return nil, err
+		}
+	}
 	if common.BaseConfig == nil {
 		common.BaseConfig = &BaseConfig{PushInterval: 60, PullInterval: 60}
 	}
@@ -284,6 +543,97 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		Tag:          fmt.Sprintf("[%s]-%s:%d", c.APIHost, common.Protocol, c.NodeId),
 		Common:       common,
 	}, nil
+}
+
+func validateSudokuProtocolSettings(settings *ProtocolSettings) error {
+	if settings == nil {
+		return fmt.Errorf("Sudoku protocol settings are missing")
+	}
+	switch strings.ToLower(strings.TrimSpace(settings.AEADMethod)) {
+	case "aes-128-gcm", "chacha20-poly1305", "none":
+	default:
+		return fmt.Errorf("invalid Sudoku aead_method: %s", settings.AEADMethod)
+	}
+	table := strings.ToLower(strings.TrimSpace(settings.TableType))
+	if table == "prefer_numeric" {
+		table = "prefer_ascii"
+	} else if table == "custom" {
+		table = "prefer_entropy"
+	}
+	switch table {
+	case "prefer_ascii", "prefer_entropy", "up_ascii_down_entropy", "up_entropy_down_ascii":
+		settings.TableType = table
+	default:
+		return fmt.Errorf("invalid Sudoku table_type: %s", settings.TableType)
+	}
+	mode := strings.ToLower(strings.TrimSpace(settings.HTTPMaskMode))
+	if mode == "split-stream" {
+		mode = "stream"
+	}
+	switch mode {
+	case "legacy", "stream", "poll", "auto", "ws":
+		settings.HTTPMaskMode = mode
+	default:
+		return fmt.Errorf("invalid Sudoku http_mask_mode: %s", settings.HTTPMaskMode)
+	}
+	multiplex := strings.ToLower(strings.TrimSpace(settings.Multiplex))
+	if multiplex == "low" {
+		multiplex = "auto"
+	} else if multiplex == "high" {
+		multiplex = "on"
+	}
+	switch multiplex {
+	case "off", "auto", "on":
+		settings.Multiplex = multiplex
+	default:
+		return fmt.Errorf("invalid Sudoku multiplex: %s", settings.Multiplex)
+	}
+	if pathRoot := strings.Trim(settings.PathRoot, " /\t\n\r\x00\v"); pathRoot != "" {
+		for i := 0; i < len(pathRoot); i++ {
+			ch := pathRoot[i]
+			if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+				(ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+				return fmt.Errorf("invalid Sudoku path_root: contains invalid character %q", ch)
+			}
+		}
+		settings.PathRoot = pathRoot
+	}
+	if err := validateSudokuTablePattern(settings.CustomTable); err != nil {
+		return err
+	}
+	for index, pattern := range settings.CustomTables {
+		if err := validateSudokuTablePattern(pattern); err != nil {
+			return fmt.Errorf("invalid Sudoku custom_tables[%d]: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func validateSudokuTablePattern(pattern string) error {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return nil
+	}
+	if len(pattern) != 8 {
+		return fmt.Errorf("custom table must contain exactly 8 x/v/p characters")
+	}
+	var counts [3]int
+	for _, ch := range strings.ToLower(pattern) {
+		switch ch {
+		case 'x':
+			counts[0]++
+		case 'v':
+			counts[1]++
+		case 'p':
+			counts[2]++
+		default:
+			return fmt.Errorf("custom table contains invalid character %q", ch)
+		}
+	}
+	if counts != [3]int{2, 4, 2} {
+		return fmt.Errorf("custom table must contain 2 x, 4 v, and 2 p characters")
+	}
+	return nil
 }
 
 func buildCertInfo(nodeID int, protocol string, settings TlsSettings) (*CertInfo, error) {

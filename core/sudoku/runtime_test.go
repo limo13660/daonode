@@ -1,0 +1,279 @@
+package sudoku
+
+import (
+	"fmt"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	panel "github.com/limo13660/daonode/api/v2board"
+	transport "github.com/limo13660/daonode/core/sudoku/transport"
+	"github.com/limo13660/daonode/limiter"
+)
+
+func TestBuildUserConfigsUsesUUIDKeysAndPreservesSettings(t *testing.T) {
+	info := sudokuNodeInfo()
+	info.Common.ProtocolSettings = panel.ProtocolSettings{
+		AEADMethod:         "CHACHA20-POLY1305",
+		PaddingMin:         0,
+		PaddingMax:         0,
+		TableType:          "prefer_entropy",
+		EnablePureDownlink: true,
+		HTTPMask:           true,
+		HTTPMaskMode:       "ws",
+		HTTPMaskTLS:        true,
+		HTTPMaskHost:       "cdn.example.com",
+		PathRoot:           "sudoku",
+		Multiplex:          "on",
+		CustomTable:        "xxppvvvv",
+		CustomTables:       []string{"xxppvvvv", "xpxpvvvv"},
+	}
+	users := map[int]panel.UserInfo{
+		1: {Id: 1, Uuid: "959df3cf-197d-4b6d-be9f-1b4ec3ad4e9f"},
+		2: {Id: 2, Uuid: "4b9edc89-cf4c-4210-bd8e-e8db8a3731ad"},
+	}
+
+	snapshot, err := buildUserConfigs(info, users)
+	if err != nil {
+		t.Fatalf("buildUserConfigs() error = %v", err)
+	}
+	if len(snapshot.byHash) != len(users) {
+		t.Fatalf("user configs = %d, want %d", len(snapshot.byHash), len(users))
+	}
+	for _, user := range users {
+		hash := transport.KIPUserHashHexFromKey(user.Uuid)
+		entry, ok := snapshot.byHash[hash]
+		if !ok {
+			t.Fatalf("missing config for user %d hash %s", user.Id, hash)
+		}
+		if entry.user != user {
+			t.Fatalf("stored user = %#v, want %#v", entry.user, user)
+		}
+		cfg := entry.cfg
+		if cfg.Key != user.Uuid {
+			t.Fatalf("user %d key = %q, want UUID", user.Id, cfg.Key)
+		}
+		if cfg.AEADMethod != "chacha20-poly1305" || cfg.PaddingMin != 0 || cfg.PaddingMax != 0 {
+			t.Fatalf("user %d crypto/padding = %#v", user.Id, cfg)
+		}
+		if !cfg.EnablePureDownlink || cfg.DisableHTTPMask || cfg.HTTPMaskMode != "ws" ||
+			!cfg.HTTPMaskTLSEnabled || cfg.HTTPMaskHost != "cdn.example.com" ||
+			cfg.HTTPMaskPathRoot != "sudoku" || cfg.MultiplexMode() != "on" {
+			t.Fatalf("user %d HTTPMask settings = %#v", user.Id, cfg)
+		}
+		if len(cfg.Tables) < 2 {
+			t.Fatalf("user %d tables = %d, want custom table candidates", user.Id, len(cfg.Tables))
+		}
+	}
+}
+
+func TestRuntimeUserLifecycleKeepsListenerAndRotatesUUIDKeys(t *testing.T) {
+	limiter.Init()
+	info := sudokuNodeInfo()
+	info.Common.ServerPort = reserveSudokuPort(t)
+	tag := fmt.Sprintf("sudoku-lifecycle-%d", info.Common.ServerPort)
+	users := []panel.UserInfo{{Id: 1, Uuid: "old-sudoku-user"}}
+	limiter.AddLimiter("sudoku", tag, 0, users, nil)
+	defer limiter.DeleteLimiter(tag)
+
+	runtime := NewRuntime(tag, info).(*runtime)
+	if _, err := runtime.AddUsers(users); err != nil {
+		t.Fatalf("AddUsers() error = %v", err)
+	}
+	if runtime.instance == nil {
+		t.Fatal("Sudoku listener was not started after adding a user")
+	}
+	if err := runtime.Start(); err != nil {
+		t.Fatalf("idempotent Start() error = %v", err)
+	}
+	assertSudokuPortListening(t, info.Common.ServerPort)
+
+	old := users[0]
+	updated := panel.UserInfo{Id: 1, Uuid: "new-sudoku-user"}
+	if err := runtime.SyncUsers([]panel.UserInfo{old}, []panel.UserInfo{updated}); err != nil {
+		t.Fatalf("SyncUsers() UUID rotation error = %v", err)
+	}
+	oldHash := transport.KIPUserHashHexFromKey(old.Uuid)
+	newHash := transport.KIPUserHashHexFromKey(updated.Uuid)
+	snapshot := runtime.instance.users.Load()
+	if snapshot == nil {
+		t.Fatal("user snapshot is nil after UUID rotation")
+	}
+	if _, ok := snapshot.byHash[oldHash]; ok {
+		t.Fatal("old UUID key remained active after rotation")
+	}
+	if _, ok := snapshot.byHash[newHash]; !ok {
+		t.Fatal("new UUID key was not activated after rotation")
+	}
+	assertSudokuPortListening(t, info.Common.ServerPort)
+
+	if err := runtime.DelUsers([]panel.UserInfo{updated}); err != nil {
+		t.Fatalf("DelUsers() error = %v", err)
+	}
+	if runtime.instance != nil {
+		t.Fatal("Sudoku listener remained active after deleting the last user")
+	}
+	if err := runtime.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func reserveSudokuPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve Sudoku port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	return port
+}
+
+func assertSudokuPortListening(t *testing.T, port int) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		t.Fatalf("Sudoku port %d is not listening: %v", port, err)
+	}
+	_ = conn.Close()
+}
+
+func TestBuildUserConfigsReusesHTTPMaskSessionsForUnchangedUsers(t *testing.T) {
+	info := sudokuNodeInfo()
+	info.Common.ProtocolSettings.HTTPMask = true
+	info.Common.ProtocolSettings.HTTPMaskMode = "poll"
+	users := map[int]panel.UserInfo{
+		1: {Id: 1, Uuid: "959df3cf-197d-4b6d-be9f-1b4ec3ad4e9f"},
+	}
+
+	first, err := buildUserConfigs(info, users)
+	if err != nil {
+		t.Fatalf("buildUserConfigs() error = %v", err)
+	}
+	second, err := buildUserConfigsWithPrevious(info, users, first)
+	if err != nil {
+		t.Fatalf("buildUserConfigsWithPrevious() error = %v", err)
+	}
+	hash := transport.KIPUserHashHexFromKey(users[1].Uuid)
+	if first.byHash[hash].tunnel == nil {
+		t.Fatal("HTTPMask tunnel server was not created")
+	}
+	if second.byHash[hash].tunnel != first.byHash[hash].tunnel {
+		t.Fatal("HTTPMask tunnel server was replaced during user sync")
+	}
+}
+
+func TestBuildUserConfigsRejectsInvalidUsers(t *testing.T) {
+	tests := []struct {
+		name  string
+		users map[int]panel.UserInfo
+		want  string
+	}{
+		{
+			name:  "empty UUID",
+			users: map[int]panel.UserInfo{1: {Id: 1, Uuid: "  "}},
+			want:  "empty UUID",
+		},
+		{
+			name: "duplicate UUID",
+			users: map[int]panel.UserInfo{
+				1: {Id: 1, Uuid: "same-key"},
+				2: {Id: 2, Uuid: "same-key"},
+			},
+			want: "duplicated",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := buildUserConfigs(sudokuNodeInfo(), test.users)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("buildUserConfigs() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildUserConfigsRejectsInvalidProtocolSettings(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*panel.NodeInfo)
+		want   string
+	}{
+		{
+			name: "non TCP transport",
+			mutate: func(info *panel.NodeInfo) {
+				info.Common.TransportProtocol = "UDP"
+			},
+			want: "must be TCP",
+		},
+		{
+			name: "invalid AEAD",
+			mutate: func(info *panel.NodeInfo) {
+				info.Common.ProtocolSettings.AEADMethod = "aes-256-gcm"
+			},
+			want: "invalid aead-method",
+		},
+		{
+			name: "invalid table",
+			mutate: func(info *panel.NodeInfo) {
+				info.Common.ProtocolSettings.TableType = "random"
+			},
+			want: "table-type",
+		},
+		{
+			name: "invalid multiplex",
+			mutate: func(info *panel.NodeInfo) {
+				info.Common.ProtocolSettings.Multiplex = "always"
+			},
+			want: "invalid multiplex",
+		},
+		{
+			name: "invalid path root",
+			mutate: func(info *panel.NodeInfo) {
+				info.Common.ProtocolSettings.PathRoot = "nested/path"
+			},
+			want: "path-root",
+		},
+		{
+			name: "invalid padding",
+			mutate: func(info *panel.NodeInfo) {
+				info.Common.ProtocolSettings.PaddingMin = 40
+				info.Common.ProtocolSettings.PaddingMax = 20
+			},
+			want: "padding-max",
+		},
+	}
+	users := map[int]panel.UserInfo{1: {Id: 1, Uuid: "959df3cf-197d-4b6d-be9f-1b4ec3ad4e9f"}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			info := sudokuNodeInfo()
+			test.mutate(info)
+			_, err := buildUserConfigs(info, users)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("buildUserConfigs() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func sudokuNodeInfo() *panel.NodeInfo {
+	return &panel.NodeInfo{
+		Type:   "sudoku",
+		Kernel: "sudoku",
+		Common: &panel.CommonNode{
+			Protocol:          "sudoku",
+			Kernel:            "sudoku",
+			ListenIP:          "127.0.0.1",
+			ServerPort:        2087,
+			TransportProtocol: "TCP",
+			ProtocolSettings: panel.ProtocolSettings{
+				AEADMethod: "chacha20-poly1305",
+				PaddingMin: 10,
+				PaddingMax: 30,
+				TableType:  "prefer_entropy",
+				Multiplex:  "off",
+			},
+		},
+	}
+}

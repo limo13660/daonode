@@ -3,8 +3,10 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +156,193 @@ func TestGetNodeInfoJuicityContract(t *testing.T) {
 	}
 	if info.Common.CertInfo == nil || info.Common.CertInfo.CertMode != "self" {
 		t.Fatalf("Juicity certificate = %#v", info.Common.CertInfo)
+	}
+}
+
+func TestGetNodeInfoSudokuContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"protocol":           "sudoku",
+			"kernel":             "sudoku",
+			"listen_ip":          "0.0.0.0",
+			"server_port":        2087,
+			"transport_protocol": "TCP",
+			"tls":                0,
+			"protocol_settings": map[string]any{
+				"aead_method":          "chacha20-poly1305",
+				"padding_min":          0,
+				"padding_max":          0,
+				"table_type":           "up_ascii_down_entropy",
+				"enable_pure_downlink": true,
+				"http_mask":            true,
+				"http_mask_mode":       "ws",
+				"http_mask_tls":        true,
+				"http_mask_host":       "cdn.example.com",
+				"path_root":            "sudoku",
+				"multiplex":            "on",
+				"custom_table":         "xxppvvvv",
+				"custom_tables":        []string{"xxppvvvv", "xpxpvvvv"},
+			},
+		}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 11, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+	if info.Type != "sudoku" || info.Kernel != "sudoku" || info.Security != None || info.Common.TransportProtocol != "TCP" {
+		t.Fatalf("Sudoku selection = %#v", info)
+	}
+	settings := info.Common.ProtocolSettings
+	if settings.AEADMethod != "chacha20-poly1305" || settings.PaddingMin != 0 || settings.PaddingMax != 0 ||
+		settings.TableType != "up_ascii_down_entropy" || !settings.EnablePureDownlink ||
+		!settings.HTTPMask || settings.HTTPMaskMode != "ws" || !settings.HTTPMaskTLS ||
+		settings.HTTPMaskHost != "cdn.example.com" || settings.PathRoot != "sudoku" ||
+		settings.Multiplex != "on" || settings.CustomTable != "xxppvvvv" || len(settings.CustomTables) != 2 {
+		t.Fatalf("Sudoku protocol settings = %#v", settings)
+	}
+}
+
+func TestGetNodeInfoSudokuRejectsUDP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"sudoku","kernel":"sudoku","listen_ip":"0.0.0.0","server_port":2087,"transport_protocol":"UDP"}`))
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 12, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := client.GetNodeInfo(context.Background()); err == nil || !strings.Contains(err.Error(), "must be TCP") {
+		t.Fatalf("GetNodeInfo() error = %v, want TCP validation error", err)
+	}
+}
+
+func TestGetNodeInfoSudokuAcceptsLegacyAliasesAndDefaults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"protocol":"SUDOKU",
+			"kernel":"SUDOKU",
+			"listen_ip":"0.0.0.0",
+			"server_port":2087,
+			"protocol_settings":{
+				"aead":"CHACHA20-POLY1305",
+				"ascii":"prefer_numeric",
+				"httpmask":{"disable":false,"mode":"split-stream","tls":true,"host":"cdn.example.com","path":"/sudoku/","multiplex":"high"},
+				"custom_tables":"[\"xxppvvvv\",\"xpxpvvvv\"]"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 13, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+	settings := info.Common.ProtocolSettings
+	if info.Type != "sudoku" || info.Kernel != "sudoku" || settings.AEADMethod != "chacha20-poly1305" ||
+		settings.TableType != "prefer_ascii" || !settings.HTTPMask || settings.HTTPMaskMode != "stream" ||
+		!settings.HTTPMaskTLS || settings.HTTPMaskHost != "cdn.example.com" || settings.PathRoot != "sudoku" ||
+		settings.Multiplex != "on" || len(settings.CustomTables) != 2 {
+		t.Fatalf("legacy Sudoku settings = %#v", settings)
+	}
+}
+
+func TestGetNodeInfoSudokuUsesOfficialDefaultsWhenSettingsAreMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"sudoku","kernel":"sudoku","listen_ip":"0.0.0.0","server_port":2087}`))
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 14, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+	settings := info.Common.ProtocolSettings
+	if settings.AEADMethod != "chacha20-poly1305" || settings.PaddingMin != 10 || settings.PaddingMax != 30 ||
+		settings.TableType != "prefer_ascii" || !settings.EnablePureDownlink || !settings.HTTPMask ||
+		settings.HTTPMaskMode != "legacy" || settings.HTTPMaskTLS || settings.Multiplex != "off" {
+		t.Fatalf("Sudoku defaults = %#v", settings)
+	}
+}
+
+func TestGetNodeInfoSudokuRejectsUnsupportedSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		setting string
+		value   string
+		want    string
+	}{
+		{name: "aead", setting: "aead_method", value: "aes-256-gcm", want: "aead_method"},
+		{name: "table", setting: "table_type", value: "random", want: "table_type"},
+		{name: "http mask mode", setting: "http_mask_mode", value: "cdn", want: "http_mask_mode"},
+		{name: "multiplex", setting: "multiplex", value: "always", want: "multiplex"},
+		{name: "path root", setting: "path_root", value: "nested/path", want: "path_root"},
+		{name: "custom table", setting: "custom_table", value: "invalid", want: "custom table"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body := fmt.Sprintf(`{"protocol":"sudoku","kernel":"sudoku","listen_ip":"0.0.0.0","server_port":2087,"protocol_settings":{"%s":%q}}`, test.setting, test.value)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+
+			retryCount := 0
+			client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 15, Key: "secret", RetryCount: &retryCount})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if _, err := client.GetNodeInfo(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("GetNodeInfo() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestGetNodeInfoSudokuTreatsEmptyLegacyFieldsAsDefaults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"sudoku","kernel":"sudoku","listen_ip":"0.0.0.0","server_port":2087,"protocol_settings":{"aead_method":"","padding_min":"","padding_max":"","table_type":"","http_mask_mode":"","multiplex":""}}`))
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 16, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+	settings := info.Common.ProtocolSettings
+	if settings.AEADMethod != "chacha20-poly1305" || settings.PaddingMin != 10 || settings.PaddingMax != 30 ||
+		settings.TableType != "prefer_ascii" || settings.HTTPMaskMode != "legacy" || settings.Multiplex != "off" {
+		t.Fatalf("empty Sudoku fields = %#v", settings)
 	}
 }

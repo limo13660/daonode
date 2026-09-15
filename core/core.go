@@ -12,6 +12,7 @@ import (
 	"github.com/limo13660/daonode/core/juicity"
 	"github.com/limo13660/daonode/core/mieru"
 	"github.com/limo13660/daonode/core/naive"
+	"github.com/limo13660/daonode/core/sudoku"
 )
 
 // ErrRuntimeStopTimeout is kept at the root package for callers that do not
@@ -46,6 +47,10 @@ var kernelDefinitions = map[string]kernelDefinition{
 	"naive": {
 		protocols:  map[string]struct{}{"naive": {}},
 		newRuntime: naive.NewRuntime,
+	},
+	"sudoku": {
+		protocols:  map[string]struct{}{"sudoku": {}},
+		newRuntime: sudoku.NewRuntime,
 	},
 }
 

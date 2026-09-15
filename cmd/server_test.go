@@ -136,6 +136,71 @@ func TestReloadKeepsActiveRuntimeWhenCandidateRuntimeIsInvalid(t *testing.T) {
 	assertTCPListening(t, oldPort)
 }
 
+func TestSudokuPanelToRuntimeLifecycle(t *testing.T) {
+	limiter.Init()
+	port := reserveTCPPort(t)
+	panelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v2/server/config":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"protocol":           "sudoku",
+				"kernel":             "sudoku",
+				"listen_ip":          "127.0.0.1",
+				"server_port":        port,
+				"transport_protocol": "TCP",
+				"tls":                0,
+				"protocol_settings": map[string]any{
+					"aead_method":          "chacha20-poly1305",
+					"padding_min":          0,
+					"padding_max":          0,
+					"table_type":           "prefer_ascii",
+					"enable_pure_downlink": true,
+					"http_mask":            true,
+					"http_mask_mode":       "legacy",
+					"multiplex":            "off",
+				},
+				"base_config": map[string]any{"push_interval": 3600, "pull_interval": 3600},
+			})
+		case "/api/v1/server/UniProxy/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"users": []map[string]any{{"id": 1, "uuid": "sudoku-panel-user", "device_limit": 0}},
+			})
+		case "/api/v1/server/UniProxy/alivelist":
+			_ = json.NewEncoder(w).Encode(map[string]any{"alive": map[int]int{}})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer panelServer.Close()
+
+	config := testConfig(panelServer.URL)
+	nodes, err := node.New(config.NodeConfigs)
+	if err != nil {
+		t.Fatalf("prepare Sudoku node from panel: %v", err)
+	}
+	reloadCh := make(chan struct{}, 1)
+	runtimeCore, err := startPreparedRuntime(config, nodes, reloadCh)
+	if err != nil {
+		_ = nodes.Close()
+		t.Fatalf("start Sudoku runtime from panel: %v", err)
+	}
+	defer func() {
+		_ = nodes.Close()
+		_ = runtimeCore.Close()
+	}()
+
+	if len(nodes.NodeInfos) != 1 || nodes.NodeInfos[0].Type != "sudoku" || nodes.NodeInfos[0].Kernel != "sudoku" {
+		t.Fatalf("panel Sudoku selection = %#v", nodes.NodeInfos)
+	}
+	settings := nodes.NodeInfos[0].Common.ProtocolSettings
+	if settings.AEADMethod != "chacha20-poly1305" || settings.TableType != "prefer_ascii" ||
+		!settings.HTTPMask || settings.HTTPMaskMode != "legacy" || settings.Multiplex != "off" {
+		t.Fatalf("panel Sudoku settings = %#v", settings)
+	}
+	assertTCPListening(t, port)
+}
+
 func TestReloadRetryDelayIsBounded(t *testing.T) {
 	tests := []struct {
 		failures int

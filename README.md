@@ -26,13 +26,14 @@ export DAONODE_RELEASE_MIRRORS="https://mirror.example/%URL%"
 
 默认不设置最低下载速度，和 v2node 的持续流式下载方式一致；如需允许极慢线路一直下载，可设置 `DAONODE_DOWNLOAD_MAX_TIME=0` 取消单个下载源的总超时。该参数只影响安装包下载，不影响系统包管理器。
 
-当前代码对齐 Mieru `v3.36.0`、NaiveProxy 官方指定的 `klzgrad/forwardproxy@naive` 提交 `d62c80d`、Caddy `v2.11.4` 与 Juicity `v0.5.0`。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手、加密传输和 Naive padding 由对应官方内核处理。Mieru `v3.36.0` 加快了新连接的用户匹配，并降低了加密内存分配和 GC 压力。
+当前代码对齐 Mieru `v3.36.0`、NaiveProxy 官方指定的 `klzgrad/forwardproxy@naive` 提交 `d62c80d`、Caddy `v2.11.4`、Juicity `v0.5.0` 与 Mihomo `v1.19.31` 的 Sudoku 实现。节点配置、用户同步、流量统计、路由组和订阅下发由 DaoBoard 管理；协议握手、加密传输和 Naive padding 由对应官方内核处理。Mieru `v3.36.0` 加快了新连接的用户匹配，并降低了加密内存分配和 GC 压力。
 
 | 面板协议 | daonode 内核 | 当前状态 |
 |---|---|---|
 | Mieru | `mieru` | 可用，支持 TCP/UDP、多端口、Traffic Pattern 与 User Hint |
 | NaiveProxy | `naive` | 可用，支持 TCP HTTP/2、QUIC HTTP/3、TLS 证书、ECH 与用户热更新 |
 | Juicity | `juicity` | 可用，支持 QUIC、TCP/UDP 转发、TLS 1.3、ECH、用户热更新与连接撤销 |
+| Sudoku | `sudoku` | 可用，支持 UUID 独立密钥、TCP、UoT UDP、HTTPMask、Multiplex、路由和用户热更新 |
 
 ## 功能
 
@@ -40,6 +41,7 @@ export DAONODE_RELEASE_MIRRORS="https://mirror.example/%URL%"
 - NaiveProxy TCP/QUIC 入站与官方 padding-enabled forwardproxy
 - NaiveProxy TLS 证书模式、ECH、HTTP/2 和 HTTP/3
 - Juicity 官方 QUIC 服务端、TCP/UDP 转发、TLS 1.3 与 ECH
+- Sudoku 官方 Mihomo wire format、UUID 多用户、TCP 转发、UoT UDP、HTTPMask（legacy/stream/poll/auto/ws）与 Multiplex
 - 官方 SOCKS5 代理请求，支持 TCP CONNECT 和 UDP ASSOCIATE
 - IPv4、IPv6、多用户和动态用户同步
 - 单端口、多端口和连续端口范围
@@ -59,12 +61,12 @@ Mieru 本身不使用 TLS 证书；NaiveProxy 与 Juicity 使用 DaoBoard 下发
 ## 工作流程
 
 ```text
-客户端（Mieru / NaiveProxy / Juicity / YSBL-Client）
+客户端（Mieru / NaiveProxy / Juicity / Sudoku / YSBL-Client）
                        |
                        v
                   daonode
                   /     \
-    Mieru 官方 API / 官方 forwardproxy / Juicity 官方协议
+    Mieru 官方 API / 官方 forwardproxy / Juicity 官方协议 / Mihomo Sudoku
                   \     /
                    目标网站
 
@@ -73,7 +75,7 @@ DaoBoard <-> 节点配置、用户、路由、流量统计 <-> daonode
 
 ## 内核文件
 
-daonode 通过 Go module 链接官方 Mieru `v3.36.0` API、NaiveProxy 文档指定的 `klzgrad/forwardproxy@naive` 和 Juicity `v0.5.0` 协议依赖。Juicity 适配层保留官方帧格式和 QUIC 行为，只补充上游服务端缺少的可关闭生命周期、热用户快照以及 DaoNode 公共流量会话。依赖版本与上游替换规则统一锁定在 `go.mod`；截至 2026-08-30，Caddy `v2.11.4`、Juicity `v0.5.0` 和 forwardproxy `naive` 分支提交 `d62c80d` 均已是对应官方仓库的最新稳定版本/分支提交。
+daonode 通过 Go module 链接官方 Mieru `v3.36.0` API、NaiveProxy 文档指定的 `klzgrad/forwardproxy@naive`、Juicity `v0.5.0` 以及 Mihomo Sudoku 所需的加密、HTTPMask 和 WebSocket 依赖。Juicity 与 Sudoku 适配层保留官方帧格式和传输行为，只补充上游服务端缺少的可关闭生命周期、热用户快照以及 DaoNode 公共流量会话。依赖版本与上游替换规则统一锁定在 `go.mod`；截至 2026-09-15，Caddy `v2.11.4`、Juicity `v0.5.0`、forwardproxy `naive` 分支提交 `d62c80d` 和 Mihomo `v1.19.31` 均已锁定。
 
 | 文件 | 内核适配职责 |
 |---|---|
@@ -94,6 +96,9 @@ daonode 通过 Go module 链接官方 Mieru `v3.36.0` API、NaiveProxy 文档指
 | `core/juicity/runtime.go` | Juicity 生命周期、UUID 凭据快照与用户热同步 |
 | `core/juicity/server.go` | 官方 Juicity QUIC/认证/转发格式、TLS、ECH 与公共流量会话接入 |
 | `core/juicity/underlay.go` | 官方 Juicity UDP underlay 授权、端点生命周期和按用户计费 |
+| `core/sudoku/runtime.go` | Sudoku 监听生命周期、UUID 用户密钥快照、热更新和公共流量会话接入 |
+| `core/sudoku/server.go` | Sudoku KIP 握手、TCP/UoT UDP 转发、HTTPMask、Multiplex、路由和用户会话 |
+| `core/sudoku/transport/` | 与 Mihomo v1.19.31 对齐的 Sudoku 加密、表、HTTPMask、UoT 和 Multiplex 实现 |
 | `.github/workflows/release.yml` | Linux 构建、打包 GeoIP/GeoSite 和发布包 |
 | `script/install.sh` | 安装二进制、配置、路由数据和 systemd 服务 |
 
@@ -241,6 +246,22 @@ journalctl -u daonode -n 100 --no-pager
 IPv6 节点建议填写 `::`，并确认防火墙、云安全组和 Docker/宿主机网络已经放行对应 TCP 或 UDP 端口。若需要一个 IPv6 socket 同时接收 IPv4，检查 `sysctl net.ipv6.bindv6only` 的结果为 `0`。
 
 附加绑定是“主端口之外的绑定列表”，不是替代主端口。每个对象的 `port` 与 `protocol` 在客户端配置中按相同位置配对；使用端口范围时，客户端和服务端范围长度必须相同。没有额外端口时直接保留默认值 `[]` 即可。
+
+Sudoku 节点使用面板 `protocol_settings` 下发以下字段：
+
+| 字段 | 可选值或说明 |
+|---|---|
+| `aead_method` | `aes-128-gcm`、`chacha20-poly1305`、`none` |
+| `padding_min` / `padding_max` | `0-100`，最大值必须不小于最小值 |
+| `table_type` | `prefer_ascii`、`prefer_entropy`、`up_ascii_down_entropy`、`up_entropy_down_ascii` |
+| `enable_pure_downlink` | 是否启用纯 Sudoku 下行，默认 `true` |
+| `http_mask` / `http_mask_mode` | 是否启用 HTTPMask；模式为 `legacy`、`stream`、`poll`、`auto`、`ws` |
+| `http_mask_tls` / `http_mask_host` | HTTPMask 的 HTTPS 和 Host 设置；legacy 模式下忽略 TLS/Host |
+| `path_root` | 可选的单级路径前缀，例如 `sudoku` |
+| `multiplex` | `off`、`auto`、`on` |
+| `custom_table` / `custom_tables` | 可选的 `x/v/p` 自定义表；`custom_tables` 可传数组或 JSON 字符串 |
+
+每个面板用户的 UUID 会作为独立 Sudoku key。面板保存后，daonode 会在下一次轮询中原子更新用户快照；UUID 变化会立即使旧 key 失效，删除最后一个用户会关闭监听端口。YSBLCore/FlClash 和最新 Shadowrocket 均可使用面板下发的 Sudoku 节点。
 
 ## User Hint
 
