@@ -83,17 +83,29 @@ type ProtocolSettings struct {
 // upgraded.  Normalising at this boundary ensures every kernel sees one
 // stable shape.
 func (p *ProtocolSettings) UnmarshalJSON(data []byte) error {
-	type plain ProtocolSettings
+	fields, err := normalizeProtocolSettingsFields(data)
+	if err != nil {
+		return err
+	}
+	decoded, err := decodeProtocolSettingsFields(fields)
+	if err != nil {
+		return err
+	}
+	*p = decoded
+	return nil
+}
+
+func normalizeProtocolSettingsFields(data []byte) (map[string]json.RawMessage, error) {
 	trimmed := bytes.TrimSpace(data)
 	// PHP's historical empty-array encoding (`[]`) is equivalent to an empty
 	// settings object for this field.  DaoBoard emits `{}` today, but accepting
 	// both avoids a needless node startup failure during upgrades.
-	if bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
 		trimmed = []byte("{}")
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &fields); err != nil {
-		return err
+		return nil, err
 	}
 
 	setAlias := func(canonical string, aliases ...string) {
@@ -174,16 +186,23 @@ func (p *ProtocolSettings) UnmarshalJSON(data []byte) error {
 				}
 				number, err := strconv.Atoi(strings.TrimSpace(encoded))
 				if err != nil {
-					return fmt.Errorf("invalid Sudoku %s: %q", key, encoded)
+					return nil, fmt.Errorf("invalid Sudoku %s: %q", key, encoded)
 				}
 				fields[key] = json.RawMessage(strconv.Itoa(number))
 			}
 		}
 	}
+	return fields, nil
+}
 
-	// Apply the same defaults as DaoBoard when a legacy response omits the
-	// Sudoku block entirely or only includes a subset of fields.  Explicit
-	// zero/false values remain untouched because presence is checked above.
+func applySudokuProtocolDefaults(settings *ProtocolSettings, data []byte) error {
+	fields, err := normalizeProtocolSettingsFields(data)
+	if err != nil {
+		return err
+	}
+	// Apply the same defaults as DaoBoard only after the node protocol is known.
+	// Explicit zero and false values remain untouched because field presence is
+	// checked before filling each default.
 	defaults := map[string]string{
 		"aead_method":          "\"chacha20-poly1305\"",
 		"padding_min":          "10",
@@ -201,14 +220,23 @@ func (p *ProtocolSettings) UnmarshalJSON(data []byte) error {
 			fields[key] = json.RawMessage(defaultValue)
 		}
 	}
-
-	normalized, err := json.Marshal(fields)
+	decoded, err := decodeProtocolSettingsFields(fields)
 	if err != nil {
 		return err
 	}
+	*settings = decoded
+	return nil
+}
+
+func decodeProtocolSettingsFields(fields map[string]json.RawMessage) (ProtocolSettings, error) {
+	type plain ProtocolSettings
+	normalized, err := json.Marshal(fields)
+	if err != nil {
+		return ProtocolSettings{}, err
+	}
 	var decoded plain
 	if err := json.Unmarshal(normalized, &decoded); err != nil {
-		return err
+		return ProtocolSettings{}, err
 	}
 	decoded.AEADMethod = strings.ToLower(strings.TrimSpace(decoded.AEADMethod))
 	decoded.TableType = strings.ToLower(strings.TrimSpace(decoded.TableType))
@@ -237,8 +265,7 @@ func (p *ProtocolSettings) UnmarshalJSON(data []byte) error {
 		}
 	}
 	decoded.CustomTables = cleanTables
-	*p = ProtocolSettings(decoded)
-	return nil
+	return ProtocolSettings(decoded), nil
 }
 
 func decodeJSONBool(value json.RawMessage) (bool, bool) {
@@ -347,15 +374,12 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 	if err := json.Unmarshal(response.Body(), common); err != nil {
 		return nil, fmt.Errorf("decode node params: %w", err)
 	}
-	// A missing protocol_settings object does not invoke
-	// ProtocolSettings.UnmarshalJSON.  Detect that legacy shape here so
-	// Sudoku still receives the same defaults as DaoBoard.
+	// Preserve the raw protocol settings so Sudoku defaults can distinguish
+	// omitted values from explicit zero and false values.
 	var envelope map[string]json.RawMessage
-	settingsPresent := false
+	var protocolSettingsJSON json.RawMessage
 	if err := json.Unmarshal(response.Body(), &envelope); err == nil {
-		if raw, ok := envelope["protocol_settings"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			settingsPresent = true
-		}
+		protocolSettingsJSON = envelope["protocol_settings"]
 	}
 	common.Protocol = strings.ToLower(strings.TrimSpace(common.Protocol))
 	if common.Protocol == "" {
@@ -470,19 +494,8 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		}
 	}
 	if common.Protocol == "sudoku" {
-		if !settingsPresent {
-			common.ProtocolSettings = ProtocolSettings{
-				AEADMethod:         "chacha20-poly1305",
-				PaddingMin:         10,
-				PaddingMax:         30,
-				TableType:          "prefer_ascii",
-				EnablePureDownlink: true,
-				HTTPMask:           true,
-				HTTPMaskMode:       "legacy",
-				HTTPMaskTLS:        false,
-				Multiplex:          "off",
-				CustomTables:       []string{},
-			}
+		if err := applySudokuProtocolDefaults(&common.ProtocolSettings, protocolSettingsJSON); err != nil {
+			return nil, fmt.Errorf("decode Sudoku protocol settings: %w", err)
 		}
 		if common.TransportProtocol == "" {
 			common.TransportProtocol = "TCP"

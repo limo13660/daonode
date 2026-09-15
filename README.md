@@ -1,6 +1,6 @@
 # daonode
 
-daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的独立节点后端。目前提供 Mieru、NaiveProxy 与 Juicity 三条运行链路，不包含 V2Ray、Xray、Hysteria 等其他协议运行时。
+daonode 是为 [DaoBoard](https://github.com/limo13660/DaoBoard) 提供服务的独立节点后端。目前提供 Mieru、NaiveProxy、Juicity 与 Sudoku 四条运行链路，不包含 V2Ray、Xray、Hysteria 等其他协议运行时。
 
 ## 慢速服务器安装
 
@@ -365,11 +365,18 @@ HTTP/HTTPS 是 Mieru 客户端提供的本地代理接口，服务端接收的�
 
 ## 构建与测试
 
-唯一支持的构建环境是 Go `1.26.1`，并且必须启用 `jsonv2` experiment。`Makefile` 会设置 `GOTOOLCHAIN=local`，避免旧版 Go 启动器静默切换工具链，并在版本不一致时直接失败：
+唯一支持的构建环境是 Go `1.26.1`，并且必须启用 `jsonv2` experiment。`Makefile` 会清除外部错误的 `GOROOT` 覆盖并设置 `GOTOOLCHAIN=local`，避免混用标准库或由旧版 Go 启动器静默切换工具链；版本不一致时会直接失败：
 
 ```bash
 make test
 make build VERSION=v0.1.0
+```
+
+Sudoku 与 YSBLCore/Mihomo 客户端的 TCP、UoT、HTTPMask 和 Multiplex 互通测试放在独立构建标签中，避免把完整 Mihomo 作为 daonode 的正式运行依赖。默认读取同级的 `../ysblcore`，也可以显式指定路径：
+
+```bash
+make test-sudoku-interop
+make test-sudoku-interop YSBLCORE_DIR=/path/to/ysblcore
 ```
 
 等价的底层命令为：
@@ -396,6 +403,7 @@ make test GO=/path/to/go1.26.1/bin/go
 - [NaiveProxy 官方服务端说明](https://github.com/klzgrad/naiveproxy#server-setup)
 - [Naive padding-enabled forwardproxy](https://github.com/klzgrad/forwardproxy/tree/naive)
 - [Juicity 官方项目](https://github.com/juicity/juicity/tree/v0.5.0)
+- [Sudoku 官方项目](https://github.com/SUDOKU-ASCII/sudoku)
 
 ## 许可证
 

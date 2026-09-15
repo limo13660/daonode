@@ -398,12 +398,15 @@ func (s *serverInstance) handleUoT(conn net.Conn, user panel.UserInfo, session *
 		if flow == nil {
 			continue
 		}
-		if _, err = flow.conn.Write(payload); err != nil {
+		session.WaitUpload(int64(len(payload)))
+		written, err := flow.conn.Write(payload)
+		if written > 0 {
+			session.RecordUpload(int64(written))
+		}
+		if err != nil || written != len(payload) {
 			removeFlow(flow)
 			continue
 		}
-		session.WaitUpload(int64(len(payload)))
-		session.RecordUpload(int64(len(payload)))
 	}
 }
 
@@ -424,7 +427,9 @@ func (s *serverInstance) handleMux(conn net.Conn, user panel.UserInfo, session *
 			if err != nil || s.router.blocked(target, host, mustPort(port)) {
 				return
 			}
-			out, err := (&net.Dialer{}).DialContext(s.ctx, "tcp", target)
+			dialCtx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+			out, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", target)
+			cancel()
 			if err != nil {
 				return
 			}

@@ -93,6 +93,12 @@ func TestGetNodeInfoNaiveECHContract(t *testing.T) {
 		!info.Common.ProtocolSettings.UDPOverTCP {
 		t.Fatalf("Naive protocol settings = %#v", info.Common.ProtocolSettings)
 	}
+	if settings := info.Common.ProtocolSettings; settings.AEADMethod != "" || settings.PaddingMin != 0 ||
+		settings.PaddingMax != 0 || settings.TableType != "" || settings.EnablePureDownlink ||
+		settings.HTTPMask || settings.HTTPMaskMode != "" || settings.Multiplex != "" ||
+		len(settings.CustomTables) != 0 {
+		t.Fatalf("Naive protocol settings contain Sudoku defaults: %#v", settings)
+	}
 	if info.Common.TlsSettings.ECH != "custom" ||
 		info.Common.TlsSettings.ECHServerName != "public.example" ||
 		info.Common.TlsSettings.ECHKey != "AQID" ||
@@ -286,6 +292,32 @@ func TestGetNodeInfoSudokuUsesOfficialDefaultsWhenSettingsAreMissing(t *testing.
 		settings.TableType != "prefer_ascii" || !settings.EnablePureDownlink || !settings.HTTPMask ||
 		settings.HTTPMaskMode != "legacy" || settings.HTTPMaskTLS || settings.Multiplex != "off" {
 		t.Fatalf("Sudoku defaults = %#v", settings)
+	}
+}
+
+func TestGetNodeInfoSudokuDefaultsPreserveExplicitZeroAndFalse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"protocol":"sudoku","kernel":"sudoku","listen_ip":"0.0.0.0","server_port":2087,"protocol_settings":{"padding_min":0,"padding_max":0,"enable_pure_downlink":false,"http_mask":false}}`))
+	}))
+	defer server.Close()
+
+	retryCount := 0
+	client, err := New(&conf.NodeConfig{APIHost: server.URL, NodeID: 17, Key: "secret", RetryCount: &retryCount})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	info, err := client.GetNodeInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetNodeInfo() error = %v", err)
+	}
+	settings := info.Common.ProtocolSettings
+	if settings.PaddingMin != 0 || settings.PaddingMax != 0 || settings.EnablePureDownlink || settings.HTTPMask {
+		t.Fatalf("explicit Sudoku zero/false settings were replaced: %#v", settings)
+	}
+	if settings.AEADMethod != "chacha20-poly1305" || settings.TableType != "prefer_ascii" ||
+		settings.HTTPMaskMode != "legacy" || settings.Multiplex != "off" {
+		t.Fatalf("missing Sudoku settings did not receive defaults: %#v", settings)
 	}
 }
 
