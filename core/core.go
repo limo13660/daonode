@@ -217,6 +217,20 @@ func (v *V2Core) DelNode(tag string) error {
 	return runtime.Stop()
 }
 
+// StopNode stops a runtime while keeping it registered so its final traffic
+// counters can be read and committed before the controller removes the node.
+// This is used during shutdown/reload because stopping the protocol closes
+// active sessions and may add their last bytes to the shared counters.
+func (v *V2Core) StopNode(tag string) error {
+	v.mu.RLock()
+	runtime, exists := v.runtimes[tag]
+	v.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+	return runtime.Stop()
+}
+
 func (v *V2Core) AddUsers(params *AddUsersParams) (int, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

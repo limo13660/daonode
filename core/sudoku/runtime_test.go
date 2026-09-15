@@ -68,6 +68,28 @@ func TestBuildUserConfigsUsesUUIDKeysAndPreservesSettings(t *testing.T) {
 	}
 }
 
+func TestCompileSudokuRoutesSupportsGeoIPPrivate(t *testing.T) {
+	policy, err := compileRoutePolicy([]panel.Route{
+		{Id: 4, Action: "block_ip", Match: []string{"geoip:private"}},
+		{Id: 5, Action: "block_port", Match: []string{"25,6881-6889"}},
+	})
+	if err != nil {
+		t.Fatalf("compileRoutePolicy() error = %v", err)
+	}
+	if !policy.blocked("", "192.168.1.10", 443) {
+		t.Fatal("geoip:private did not block RFC1918 address")
+	}
+	if !policy.blocked("", "100.64.1.1", 443) {
+		t.Fatal("geoip:private did not block CGNAT address")
+	}
+	if policy.blocked("", "8.8.8.8", 443) {
+		t.Fatal("geoip:private blocked a public address")
+	}
+	if !policy.blocked("", "8.8.8.8", 6885) {
+		t.Fatal("comma/range port matcher did not block port")
+	}
+}
+
 func TestRuntimeUserLifecycleKeepsListenerAndRotatesUUIDKeys(t *testing.T) {
 	limiter.Init()
 	info := sudokuNodeInfo()

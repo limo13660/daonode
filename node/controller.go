@@ -199,6 +199,12 @@ func (c *Controller) Close() error {
 	}
 	tasks.Wait()
 	if c.active && c.server != nil && c.tag != "" {
+		// Stop protocol workers first. Their connection close paths flush the
+		// final bytes into RuntimeServices; the counters must be read only after
+		// that point or shutdown can lose traffic.
+		if stopErr := c.server.StopNode(c.tag); stopErr != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": stopErr}).Warn("Stop runtime before final traffic flush failed")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := c.flushUserTraffic(ctx); err != nil {
 			log.WithFields(log.Fields{
