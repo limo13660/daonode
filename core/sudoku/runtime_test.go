@@ -204,6 +204,52 @@ func TestBuildUserConfigsReusesHTTPMaskSessionsForUnchangedUsers(t *testing.T) {
 	if second.byHash[hash].tunnel != first.byHash[hash].tunnel {
 		t.Fatal("HTTPMask tunnel server was replaced during user sync")
 	}
+	if second.byHash[hash].cfg != first.byHash[hash].cfg {
+		t.Fatal("Sudoku tables were rebuilt during an unchanged user sync")
+	}
+}
+
+func TestRuntimeStopClosesStalledSudokuHandshake(t *testing.T) {
+	limiter.Init()
+	info := sudokuNodeInfo()
+	info.Common.ServerPort = reserveSudokuPort(t)
+	tag := fmt.Sprintf("sudoku-stalled-stop-%d", info.Common.ServerPort)
+	users := []panel.UserInfo{{Id: 1, Uuid: "stalled-sudoku-user"}}
+	limiter.AddLimiter("sudoku", tag, 0, users, nil)
+	defer limiter.DeleteLimiter(tag)
+
+	runtime := NewRuntime(tag, info).(*runtime)
+	if _, err := runtime.AddUsers(users); err != nil {
+		t.Fatalf("AddUsers() error = %v", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", info.Common.ServerPort), time.Second)
+	if err != nil {
+		t.Fatalf("dial Sudoku listener: %v", err)
+	}
+	defer conn.Close()
+
+	acceptedDeadline := time.Now().Add(time.Second)
+	for {
+		runtime.instance.connMu.Lock()
+		accepted := len(runtime.instance.conns) > 0
+		runtime.instance.connMu.Unlock()
+		if accepted {
+			break
+		}
+		if time.Now().After(acceptedDeadline) {
+			t.Fatal("stalled handshake was not accepted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	started := time.Now()
+	if err := runtime.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Stop() took %s with a stalled handshake", elapsed)
+	}
 }
 
 func TestBuildUserConfigsRejectsInvalidUsers(t *testing.T) {

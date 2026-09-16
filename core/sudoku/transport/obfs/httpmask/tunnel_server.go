@@ -54,6 +54,7 @@ type TunnelServer struct {
 
 	mu       sync.Mutex
 	sessions map[string]*tunnelSession
+	closed   bool
 }
 
 const tunnelHeaderReadTimeout = 15 * time.Second
@@ -133,6 +134,51 @@ func NewTunnelServer(opts TunnelServerOptions) *TunnelServer {
 	}
 }
 
+// Close terminates all HTTPMask sessions and wakes their reaper/pull
+// goroutines. Runtime shutdown must not leave the two-minute session TTL
+// workers behind after the listener has been stopped.
+func (s *TunnelServer) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.closed = true
+	sessions := make([]*tunnelSession, 0, len(s.sessions))
+	for token, sess := range s.sessions {
+		delete(s.sessions, token)
+		sessions = append(sessions, sess)
+	}
+	s.mu.Unlock()
+	for _, sess := range sessions {
+		if sess == nil {
+			continue
+		}
+		if sess.closed != nil {
+			sess.closeOnce.Do(func() { close(sess.closed) })
+		}
+		sess.pullMu.Lock()
+		lease := sess.pull
+		sess.pullMu.Unlock()
+		if lease != nil {
+			lease.stop()
+		}
+		if sess.conn != nil {
+			_ = sess.conn.Close()
+		}
+	}
+	return nil
+}
+
+func (s *TunnelServer) isClosed() bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	return closed
+}
+
 // HandleConn inspects rawConn. If it is an HTTP tunnel request (stream/poll), it is handled here and:
 //   - returns HandleStartTunnel + a net.Conn that carries the raw Sudoku stream (stream or poll session pipe)
 //   - or returns HandleDone if the HTTP request is a poll control request (push/pull) and no Sudoku handshake should run on this TCP conn
@@ -141,6 +187,9 @@ func NewTunnelServer(opts TunnelServerOptions) *TunnelServer {
 func (s *TunnelServer) HandleConn(rawConn net.Conn) (HandleResult, net.Conn, error) {
 	if rawConn == nil {
 		return HandleDone, nil, errors.New("nil conn")
+	}
+	if s.isClosed() {
+		return HandleDone, nil, net.ErrClosed
 	}
 
 	passThrough := func(prefix []byte) (HandleResult, net.Conn, error) {
@@ -744,6 +793,13 @@ func (s *TunnelServer) sessionAuthorize(rawConn net.Conn, headerBytes, buffered,
 	}
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = c1.Close()
+		_ = c2.Close()
+		_ = rawConn.Close()
+		return HandleDone, nil, net.ErrClosed
+	}
 	s.sessions[token] = &tunnelSession{conn: c2, closed: make(chan struct{}), lastActive: time.Now(), nextUploadSeq: 1}
 	s.mu.Unlock()
 

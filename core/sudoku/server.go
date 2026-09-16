@@ -20,24 +20,34 @@ import (
 )
 
 type userConfig struct {
-	user   panel.UserInfo
-	cfg    *transport.ProtocolConfig
-	tunnel *transport.HTTPMaskTunnelServer
+	user             panel.UserInfo
+	cfg              *transport.ProtocolConfig
+	tunnel           *transport.HTTPMaskTunnelServer
+	tableFingerprint string
 }
-type userConfigSnapshot struct{ byHash map[string]userConfig }
+type userConfigSnapshot struct {
+	byHash  map[string]userConfig
+	entries []userConfig
+}
 
 var errHTTPMaskHandled = errors.New("Sudoku HTTPMask control connection handled")
 
+const maxConcurrentSudokuHandshakes = 128
+
 type serverInstance struct {
-	services *shared.RuntimeServices
-	router   *routePolicy
-	users    atomic.Pointer[userConfigSnapshot]
-	listener net.Listener
-	ctx      context.Context
-	cancel   context.CancelFunc
-	done     chan error
-	close    sync.Once
-	closeErr error
+	services       *shared.RuntimeServices
+	router         *routePolicy
+	users          atomic.Pointer[userConfigSnapshot]
+	listener       net.Listener
+	ctx            context.Context
+	cancel         context.CancelFunc
+	done           chan error
+	close          sync.Once
+	closeErr       error
+	connMu         sync.Mutex
+	conns          map[net.Conn]struct{}
+	handlers       sync.WaitGroup
+	handshakeSlots chan struct{}
 }
 
 func buildUserConfigs(info *panel.NodeInfo, users map[int]panel.UserInfo) (*userConfigSnapshot, error) {
@@ -75,7 +85,10 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 	if err != nil {
 		return nil, fmt.Errorf("invalid multiplex: %w", err)
 	}
-	out := &userConfigSnapshot{byHash: make(map[string]userConfig, len(users))}
+	out := &userConfigSnapshot{
+		byHash:  make(map[string]userConfig, len(users)),
+		entries: make([]userConfig, 0, len(users)),
+	}
 	for _, user := range users {
 		key := strings.TrimSpace(user.Uuid)
 		if key == "" {
@@ -85,26 +98,40 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 		if _, ok := out.byHash[hash]; ok {
 			return nil, fmt.Errorf("Sudoku user UUID hash is duplicated")
 		}
+		cfg := &transport.ProtocolConfig{Key: key, AEADMethod: aead, PaddingMin: ps.PaddingMin, PaddingMax: ps.PaddingMax, EnablePureDownlink: ps.EnablePureDownlink, HandshakeTimeoutSeconds: 5, DisableHTTPMask: !ps.HTTPMask, HTTPMaskMode: httpMaskMode, HTTPMaskTLSEnabled: ps.HTTPMaskTLS, HTTPMaskHost: ps.HTTPMaskHost, HTTPMaskPathRoot: ps.PathRoot, Multiplex: multiplex, HTTPMaskMultiplex: multiplex}
+		tableFingerprint := sudokuTableFingerprint(tableType, ps.CustomTable, ps.CustomTables)
+		if previousEntry, ok := previousUserConfig(previous, hash); ok && previousEntry.cfg != nil && previousEntry.tableFingerprint == tableFingerprint && sameSudokuProtocolConfig(previousEntry.cfg, cfg) {
+			// User polling frequently returns a changed list while the protocol
+			// settings remain identical. Reuse the immutable table set instead
+			// of rebuilding the expensive Sudoku mapping for every UUID.
+			previousEntry.user = user
+			out.byHash[hash] = previousEntry
+			out.entries = append(out.entries, previousEntry)
+			continue
+		}
 		tables, err := transport.NewServerTablesWithCustomPatterns(key, tableType, ps.CustomTable, ps.CustomTables)
 		if err != nil {
 			return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, err)
 		}
-		cfg := &transport.ProtocolConfig{Key: key, AEADMethod: aead, Tables: tables, PaddingMin: ps.PaddingMin, PaddingMax: ps.PaddingMax, EnablePureDownlink: ps.EnablePureDownlink, HandshakeTimeoutSeconds: 5, DisableHTTPMask: !ps.HTTPMask, HTTPMaskMode: httpMaskMode, HTTPMaskTLSEnabled: ps.HTTPMaskTLS, HTTPMaskHost: ps.HTTPMaskHost, HTTPMaskPathRoot: ps.PathRoot, Multiplex: multiplex, HTTPMaskMultiplex: multiplex}
+		cfg.Tables = tables
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate Sudoku user %d: %w", user.Id, err)
 		}
-		entry := userConfig{user: user, cfg: cfg}
+		entry := userConfig{user: user, cfg: cfg, tableFingerprint: tableFingerprint}
 		if !cfg.DisableHTTPMask && !strings.EqualFold(strings.TrimSpace(cfg.HTTPMaskMode), "") && !strings.EqualFold(strings.TrimSpace(cfg.HTTPMaskMode), "legacy") {
-			if previousEntry, ok := previousUserConfig(previous, hash); ok {
-				entry.tunnel = previousEntry.tunnel
-			}
-			if entry.tunnel == nil {
-				entry.tunnel = transport.NewHTTPMaskTunnelServerWithFallback(cfg)
-			}
+			// A tunnel captures the key, table candidates, mode and path root at
+			// construction time. Reusing it after any of those settings change
+			// would keep accepting stale credentials and leak old sessions.
+			entry.tunnel = transport.NewHTTPMaskTunnelServerWithFallback(cfg)
 		}
 		out.byHash[hash] = entry
+		out.entries = append(out.entries, entry)
 	}
 	return out, nil
+}
+
+func sudokuTableFingerprint(tableType, customTable string, customTables []string) string {
+	return strings.Join(append([]string{tableType, strings.TrimSpace(customTable)}, customTables...), "\x00")
 }
 
 func previousUserConfig(snapshot *userConfigSnapshot, hash string) (userConfig, bool) {
@@ -113,6 +140,51 @@ func previousUserConfig(snapshot *userConfigSnapshot, hash string) (userConfig, 
 	}
 	entry, ok := snapshot.byHash[hash]
 	return entry, ok
+}
+
+// closeReplacedHTTPMaskTunnels releases tunnel session reapers when a panel
+// sync removes a user or changes its HTTPMask settings. Tunnels that are still
+// referenced by the new immutable snapshot are retained.
+func closeReplacedHTTPMaskTunnels(previous, current *userConfigSnapshot) {
+	if previous == nil {
+		return
+	}
+	active := make(map[*transport.HTTPMaskTunnelServer]struct{})
+	if current != nil {
+		for _, entry := range current.entries {
+			if entry.tunnel != nil {
+				active[entry.tunnel] = struct{}{}
+			}
+		}
+	}
+	for _, entry := range previous.entries {
+		if entry.tunnel == nil {
+			continue
+		}
+		if _, ok := active[entry.tunnel]; ok {
+			continue
+		}
+		_ = entry.tunnel.Close()
+	}
+}
+
+func sameSudokuProtocolConfig(a, b *transport.ProtocolConfig) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Key == b.Key &&
+		a.AEADMethod == b.AEADMethod &&
+		a.PaddingMin == b.PaddingMin &&
+		a.PaddingMax == b.PaddingMax &&
+		a.EnablePureDownlink == b.EnablePureDownlink &&
+		a.HandshakeTimeoutSeconds == b.HandshakeTimeoutSeconds &&
+		a.DisableHTTPMask == b.DisableHTTPMask &&
+		a.HTTPMaskMode == b.HTTPMaskMode &&
+		a.HTTPMaskTLSEnabled == b.HTTPMaskTLSEnabled &&
+		a.HTTPMaskHost == b.HTTPMaskHost &&
+		a.HTTPMaskPathRoot == b.HTTPMaskPathRoot &&
+		a.Multiplex == b.Multiplex &&
+		a.HTTPMaskMultiplex == b.HTTPMaskMultiplex
 }
 
 func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *userConfigSnapshot) (*serverInstance, error) {
@@ -129,7 +201,7 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 		return nil, fmt.Errorf("listen for Sudoku server: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1)}
+	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes)}
 	s.users.Store(users)
 	go s.serve()
 	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash)}).Info("Sudoku runtime started")
@@ -147,12 +219,35 @@ func (s *serverInstance) serve() {
 			}
 			return
 		}
-		go s.handle(conn)
+		s.handlers.Add(1)
+		s.connMu.Lock()
+		s.conns[conn] = struct{}{}
+		s.connMu.Unlock()
+		go func() {
+			defer s.handlers.Done()
+			defer func() {
+				s.connMu.Lock()
+				delete(s.conns, conn)
+				s.connMu.Unlock()
+			}()
+			s.handle(conn)
+		}()
 	}
 }
 
 func (s *serverInstance) handle(raw net.Conn) {
 	defer raw.Close()
+	select {
+	case s.handshakeSlots <- struct{}{}:
+		defer func() { <-s.handshakeSlots }()
+	case <-s.ctx.Done():
+		return
+	default:
+		// Refuse excess unauthenticated handshakes instead of allowing a burst
+		// of malformed connections to consume one goroutine and a full key/table
+		// probe for every user indefinitely.
+		return
+	}
 	entry, conn, meta, err := s.handshake(raw)
 	if err != nil {
 		return
@@ -193,12 +288,31 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 	if snapshot == nil {
 		return userConfig{}, nil, nil, errors.New("no users")
 	}
-	entries := make([]userConfig, 0, len(snapshot.byHash))
-	for _, e := range snapshot.byHash {
-		entries = append(entries, e)
+	entries := snapshot.entries
+	if len(entries) == 0 && len(snapshot.byHash) > 0 {
+		// Keep compatibility with snapshots assembled by older callers/tests.
+		entries = make([]userConfig, 0, len(snapshot.byHash))
+		for _, e := range snapshot.byHash {
+			entries = append(entries, e)
+		}
 	}
+	handshakeBudget := 5 * time.Second
+	for _, entry := range entries {
+		if entry.tunnel != nil {
+			// HTTPMask stream/poll authorization can legitimately need a few
+			// extra round trips. HandleConn applies its own bounded header read;
+			// keep the outer budget aligned with that path.
+			handshakeBudget = 15 * time.Second
+			break
+		}
+	}
+	deadline := time.Now().Add(handshakeBudget)
 	replay := newReplayConn(raw)
 	for _, entry := range entries {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
 		cfg := *entry.cfg
 		handshakeConn := net.Conn(replay)
 		if entry.tunnel != nil {
@@ -217,6 +331,18 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 				cfg = *tunnelCfg
 			}
 		}
+		// ServerHandshake resets the socket deadline after each attempt. Use
+		// the remaining connection-wide budget so a malformed stream cannot
+		// make us wait for the per-user timeout once for every UUID.
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		attemptSeconds := int((remaining + time.Second - 1) / time.Second)
+		if attemptSeconds < 1 {
+			attemptSeconds = 1
+		}
+		cfg.HandshakeTimeoutSeconds = attemptSeconds
 		conn, meta, err := transport.ServerHandshake(handshakeConn, &cfg)
 		if err == nil {
 			if meta == nil || meta.UserHash != transport.KIPUserHashHexFromKey(entry.user.Uuid) {
@@ -444,11 +570,52 @@ func (s *serverInstance) Close() error {
 	s.close.Do(func() {
 		s.cancel()
 		_ = s.listener.Close()
+		deadline := time.Now().Add(runtimeStopTimeout)
+		acceptTimedOut := false
 		select {
 		case err := <-s.done:
 			s.closeErr = err
-		case <-time.After(runtimeStopTimeout):
+		case <-time.After(time.Until(deadline)):
 			s.closeErr = fmt.Errorf("%w after %s", contract.ErrRuntimeStopTimeout, runtimeStopTimeout)
+			acceptTimedOut = true
+		}
+		s.connMu.Lock()
+		active := make([]net.Conn, 0, len(s.conns))
+		for conn := range s.conns {
+			active = append(active, conn)
+		}
+		s.connMu.Unlock()
+		for _, conn := range active {
+			_ = conn.Close()
+		}
+		if snapshot := s.users.Load(); snapshot != nil {
+			for _, entry := range snapshot.byHash {
+				if entry.tunnel != nil {
+					_ = entry.tunnel.Close()
+				}
+			}
+		}
+		done := make(chan struct{})
+		go func() {
+			s.handlers.Wait()
+			close(done)
+		}()
+		if acceptTimedOut {
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if s.closeErr == nil {
+				s.closeErr = fmt.Errorf("%w after %s", contract.ErrRuntimeStopTimeout, runtimeStopTimeout)
+			}
+			return
+		}
+		select {
+		case <-done:
+		case <-time.After(remaining):
+			if s.closeErr == nil {
+				s.closeErr = fmt.Errorf("%w after %s", contract.ErrRuntimeStopTimeout, runtimeStopTimeout)
+			}
 		}
 	})
 	return s.closeErr

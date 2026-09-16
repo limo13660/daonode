@@ -74,6 +74,14 @@ func newHTTPMaskTunnelServer(cfg *ProtocolConfig, passThroughOnReject bool) *HTT
 	return &HTTPMaskTunnelServer{cfg: cfg, ts: ts}
 }
 
+// Close terminates active HTTPMask sessions owned by this runtime.
+func (s *HTTPMaskTunnelServer) Close() error {
+	if s == nil || s.ts == nil {
+		return nil
+	}
+	return s.ts.Close()
+}
+
 // WrapConn inspects an accepted TCP connection and upgrades it to an HTTP tunnel stream when needed.
 //
 // Returns:

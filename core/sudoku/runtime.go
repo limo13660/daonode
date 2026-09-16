@@ -98,6 +98,7 @@ func (r *runtime) SyncUsers(deleted, added []panel.UserInfo) error {
 		}
 	} else {
 		r.instance.users.Store(configs)
+		closeReplacedHTTPMaskTunnels(previousConfigs, configs)
 	}
 	r.RuntimeServices.SyncUsers(deleted, added)
 	return nil

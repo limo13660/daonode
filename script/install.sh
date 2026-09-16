@@ -529,7 +529,9 @@ ExecStartPre=/usr/local/daonode/count-start.sh
 ExecStart=/usr/local/daonode/daonode server
 Restart=always
 RestartSec=2
-TimeoutStopSec=15
+# A graceful stop closes protocol sessions, waits for proxy workers and makes
+# one final traffic report. Keep enough time for that sequence on a busy node.
+TimeoutStopSec=45
 KillMode=control-group
 
 [Install]

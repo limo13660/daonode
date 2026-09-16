@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/rand"
 	"strings"
+	"sync"
 )
 
 var (
@@ -20,6 +21,66 @@ type Table struct {
 	layout      *byteLayout
 	opposite    *Table
 	hint        uint32
+}
+
+// The set of valid 4x4 grids and the clue combinations that uniquely identify
+// each grid are independent of the user key and byte layout. Building them for
+// every UUID made node startup/reload CPU grow linearly with the user count.
+// Build the immutable data once per process and reuse it for all tables.
+var sudokuTableData struct {
+	once            sync.Once
+	grids           []Grid
+	uniquePositions map[Grid][][]int
+}
+
+func sharedSudokuTableData() ([]Grid, map[Grid][][]int) {
+	sudokuTableData.once.Do(func() {
+		grids := GenerateAllGrids()
+		combinations := make([][]int, 0, 1820)
+		var combine func(int, int, []int)
+		combine = func(start, left int, current []int) {
+			if left == 0 {
+				positions := make([]int, len(current))
+				copy(positions, current)
+				combinations = append(combinations, positions)
+				return
+			}
+			for i := start; i <= 16-left; i++ {
+				combine(i+1, left-1, append(current, i))
+			}
+		}
+		combine(0, 4, nil)
+
+		unique := make(map[Grid][][]int, len(grids))
+		for _, target := range grids {
+			positions := make([][]int, 0, len(combinations))
+			for _, candidate := range combinations {
+				matchCount := 0
+				for _, grid := range grids {
+					match := true
+					for _, pos := range candidate {
+						if grid[pos] != target[pos] {
+							match = false
+							break
+						}
+					}
+					if match {
+						matchCount++
+						if matchCount > 1 {
+							break
+						}
+					}
+				}
+				if matchCount == 1 {
+					positions = append(positions, candidate)
+				}
+			}
+			unique[target] = positions
+		}
+		sudokuTableData.grids = grids
+		sudokuTableData.uniquePositions = unique
+	})
+	return sudokuTableData.grids, sudokuTableData.uniquePositions
 }
 
 // NewTable initializes the obfuscation tables with built-in layouts.
@@ -79,8 +140,8 @@ func newSingleDirectionTable(key string, mode string, customPattern string) (*Ta
 	}
 	t.PaddingPool = append(t.PaddingPool, layout.paddingPool...)
 
-	// 生成数独网格 (逻辑不变)
-	allGrids := GenerateAllGrids()
+	// 生成数独网格及唯一线索组合。它们与 key/layout 无关，进程内复用。
+	allGrids, uniquePositions := sharedSudokuTableData()
 	h := sha256.New()
 	h.Write([]byte(key))
 	seed := int64(binary.BigEndian.Uint64(h.Sum(nil)[:8]))
@@ -92,28 +153,10 @@ func newSingleDirectionTable(key string, mode string, customPattern string) (*Ta
 		shuffledGrids[i], shuffledGrids[j] = shuffledGrids[j], shuffledGrids[i]
 	})
 
-	// 预计算组合
-	var combinations [][]int
-	var combine func(int, int, []int)
-	combine = func(s, k int, c []int) {
-		if k == 0 {
-			tmp := make([]int, len(c))
-			copy(tmp, c)
-			combinations = append(combinations, tmp)
-			return
-		}
-		for i := s; i <= 16-k; i++ {
-			c = append(c, i)
-			combine(i+1, k-1, c)
-			c = c[:len(c)-1]
-		}
-	}
-	combine(0, 4, []int{})
-
 	// 构建映射表
 	for byteVal := 0; byteVal < 256; byteVal++ {
 		targetGrid := shuffledGrids[byteVal]
-		for _, positions := range combinations {
+		for _, positions := range uniquePositions[targetGrid] {
 			var currentHints [4]byte
 
 			// 1. 计算抽象提示 (Abstract Hints)
@@ -125,35 +168,15 @@ func newSingleDirectionTable(key string, mode string, customPattern string) (*Ta
 				rawParts[i] = struct{ val, pos byte }{val, uint8(pos)}
 			}
 
-			// 检查唯一性 (数独逻辑)
-			matchCount := 0
-			for _, g := range allGrids {
-				match := true
-				for _, p := range rawParts {
-					if g[p.pos] != p.val {
-						match = false
-						break
-					}
-				}
-				if match {
-					matchCount++
-					if matchCount > 1 {
-						break
-					}
-				}
+			// 这些 positions 已在 sharedSudokuTableData 中确认唯一，直接生成编码。
+			for i, p := range rawParts {
+				currentHints[i] = t.layout.hintByte(p.val-1, p.pos)
 			}
 
-			if matchCount == 1 {
-				// 唯一确定，生成最终编码字节
-				for i, p := range rawParts {
-					currentHints[i] = t.layout.hintByte(p.val-1, p.pos)
-				}
-
-				t.EncodeTable[byteVal] = append(t.EncodeTable[byteVal], currentHints)
-				// 生成解码键 (需要对 Hints 进行排序以忽略传输顺序)
-				key := packHintsToKey(currentHints)
-				t.DecodeMap[key] = byte(byteVal)
-			}
+			t.EncodeTable[byteVal] = append(t.EncodeTable[byteVal], currentHints)
+			// 生成解码键 (需要对 Hints 进行排序以忽略传输顺序)
+			key := packHintsToKey(currentHints)
+			t.DecodeMap[key] = byte(byteVal)
 		}
 	}
 	return t, nil
