@@ -205,9 +205,9 @@ func applySudokuProtocolDefaults(settings *ProtocolSettings, data []byte) error 
 	// checked before filling each default.
 	defaults := map[string]string{
 		"aead_method":          "\"chacha20-poly1305\"",
-		"padding_min":          "10",
-		"padding_max":          "30",
-		"table_type":           "\"prefer_ascii\"",
+		"padding_min":          "5",
+		"padding_max":          "15",
+		"table_type":           "\"prefer_entropy\"",
 		"enable_pure_downlink": "true",
 		"http_mask":            "true",
 		"http_mask_mode":       "\"legacy\"",
@@ -508,7 +508,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 			common.ProtocolSettings.AEADMethod = "chacha20-poly1305"
 		}
 		if strings.TrimSpace(common.ProtocolSettings.TableType) == "" {
-			common.ProtocolSettings.TableType = "prefer_ascii"
+			common.ProtocolSettings.TableType = "prefer_entropy"
 		}
 		if strings.TrimSpace(common.ProtocolSettings.HTTPMaskMode) == "" {
 			common.ProtocolSettings.HTTPMaskMode = "legacy"

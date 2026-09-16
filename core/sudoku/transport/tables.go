@@ -64,5 +64,30 @@ func NewServerTablesWithCustomPatterns(key string, tableType string, customTable
 	if asciiMode.Uplink == "entropy" && len(patterns) > 0 && strings.TrimSpace(patterns[0]) != "" {
 		patterns = append([]string{""}, patterns...)
 	}
-	return NewTablesWithCustomPatterns(key, tableType, "", patterns)
+	tables, err := NewTablesWithCustomPatterns(key, tableType, "", patterns)
+	if err != nil {
+		return nil, err
+	}
+
+	// Shadowrocket's sudoku:// URI does not carry the ASCII/table preference.
+	// When the panel has no custom table, accept the two built-in defaults so
+	// existing nodes configured as prefer_ascii can also accept URI clients
+	// whose implementation defaults to prefer_entropy (and vice versa).
+	if strings.TrimSpace(customTable) == "" && len(customTables) == 0 {
+		fallbackType := ""
+		switch strings.ToLower(strings.TrimSpace(tableType)) {
+		case "prefer_ascii":
+			fallbackType = "prefer_entropy"
+		case "prefer_entropy":
+			fallbackType = "prefer_ascii"
+		}
+		if fallbackType != "" {
+			fallback, fallbackErr := NewTableWithCustom(key, fallbackType, "")
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			tables = append(tables, fallback)
+		}
+	}
+	return tables, nil
 }

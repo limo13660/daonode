@@ -68,6 +68,26 @@ func TestBuildUserConfigsUsesUUIDKeysAndPreservesSettings(t *testing.T) {
 	}
 }
 
+func TestBuildUserConfigsAcceptsShadowrocketDefaultTable(t *testing.T) {
+	info := sudokuNodeInfo()
+	info.Common.ProtocolSettings.TableType = "prefer_ascii"
+	info.Common.ProtocolSettings.CustomTable = ""
+	info.Common.ProtocolSettings.CustomTables = nil
+	users := map[int]panel.UserInfo{1: {Id: 1, Uuid: "shadowrocket-user"}}
+
+	snapshot, err := buildUserConfigs(info, users)
+	if err != nil {
+		t.Fatalf("buildUserConfigs() error = %v", err)
+	}
+	entry := snapshot.byHash[transport.KIPUserHashHexFromKey("shadowrocket-user")]
+	if entry.cfg == nil || len(entry.cfg.Tables) != 2 {
+		t.Fatalf("table candidates = %#v, want configured and compatibility tables", entry.cfg)
+	}
+	if entry.cfg.Tables[0].Hint() == entry.cfg.Tables[1].Hint() {
+		t.Fatal("configured and compatibility tables have the same hint")
+	}
+}
+
 func TestCompileSudokuRoutesSupportsGeoIPPrivate(t *testing.T) {
 	policy, err := compileRoutePolicy([]panel.Route{
 		{Id: 4, Action: "block_ip", Match: []string{"geoip:private"}},

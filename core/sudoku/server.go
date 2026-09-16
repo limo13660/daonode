@@ -55,10 +55,10 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 	}
 	tableType := strings.TrimSpace(ps.TableType)
 	if tableType == "" {
-		// DaoBoard and the official Mihomo Sudoku client default to the
-		// ASCII table.  Keep this fallback aligned so a legacy panel response
-		// that omits table_type can still complete the handshake.
-		tableType = "prefer_ascii"
+		// DaoBoard and the official Sudoku config default to the entropy table.
+		// Keep this fallback aligned so a legacy panel response that omits
+		// table_type can still complete the handshake.
+		tableType = "prefer_entropy"
 	}
 	normalizedTableType, err := transport.NormalizeTableType(tableType)
 	if err != nil {
