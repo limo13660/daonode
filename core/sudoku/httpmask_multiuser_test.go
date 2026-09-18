@@ -103,6 +103,10 @@ func TestMultiUserRawAndLegacyRouteSecondUUID(t *testing.T) {
 	}{
 		{name: "raw", serverMode: "raw", clientMode: "raw"},
 		{name: "legacy", serverMode: "legacy", clientMode: "legacy"},
+		{name: "auto-legacy-fallback", serverMode: "auto", clientMode: "legacy"},
+		{name: "stream-legacy-fallback", serverMode: "stream", clientMode: "legacy"},
+		{name: "poll-legacy-fallback", serverMode: "poll", clientMode: "legacy"},
+		{name: "ws-legacy-fallback", serverMode: "ws", clientMode: "legacy"},
 		{name: "raw-fallback-from-stream", serverMode: "stream", clientMode: "raw"},
 	}
 	for _, test := range tests {

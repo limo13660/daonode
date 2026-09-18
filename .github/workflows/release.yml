@@ -14,7 +14,7 @@ on:
 jobs:
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GOEXPERIMENT: jsonv2
     steps:
@@ -76,7 +76,7 @@ jobs:
             goarch: s390x
       fail-fast: false
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GOOS: ${{ matrix.goos }}
       GOARCH: ${{ matrix.goarch }}
@@ -158,7 +158,7 @@ jobs:
   publish:
     if: ${{ inputs.release_tag != '' }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Download release assets
         uses: actions/download-artifact@v7

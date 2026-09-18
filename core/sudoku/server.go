@@ -35,22 +35,31 @@ var errHTTPMaskHandled = errors.New("Sudoku HTTPMask control connection handled"
 // A Sudoku handshake is deliberately CPU-heavy (table probing, AEAD and
 // X25519). Keep unauthenticated work bounded so a burst of probes cannot
 // starve established proxy sessions or make the host appear hung.
-const maxConcurrentSudokuHandshakes = 32
+const (
+	// Keep the expensive unauthenticated path small on low-memory nodes. A
+	// single Shadowrocket client can open several probes and reconnects at once.
+	maxConcurrentSudokuHandshakes = 8
+	// HTTPMask stream/poll may legitimately use several underlying sockets
+	// for one logical connection, so keep this equal to the global budget.
+	maxConcurrentSudokuHandshakesPerSource = 8
+)
 
 type serverInstance struct {
-	services       *shared.RuntimeServices
-	router         *routePolicy
-	users          atomic.Pointer[userConfigSnapshot]
-	listener       net.Listener
-	ctx            context.Context
-	cancel         context.CancelFunc
-	done           chan error
-	close          sync.Once
-	closeErr       error
-	connMu         sync.Mutex
-	conns          map[net.Conn]struct{}
-	handlers       sync.WaitGroup
-	handshakeSlots chan struct{}
+	services           *shared.RuntimeServices
+	router             *routePolicy
+	users              atomic.Pointer[userConfigSnapshot]
+	listener           net.Listener
+	ctx                context.Context
+	cancel             context.CancelFunc
+	done               chan error
+	close              sync.Once
+	closeErr           error
+	connMu             sync.Mutex
+	conns              map[net.Conn]struct{}
+	handlers           sync.WaitGroup
+	handshakeSlots     chan struct{}
+	handshakeMu        sync.Mutex
+	handshakesBySource map[string]int
 }
 
 func buildUserConfigs(info *panel.NodeInfo, users map[int]panel.UserInfo) (*userConfigSnapshot, error) {
@@ -246,7 +255,7 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 		return nil, fmt.Errorf("listen for Sudoku server: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes)}
+	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int)}
 	s.users.Store(users)
 	go s.serve()
 	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash)}).Info("Sudoku runtime started")
@@ -282,21 +291,14 @@ func (s *serverInstance) serve() {
 
 func (s *serverInstance) handle(raw net.Conn) {
 	defer raw.Close()
-	handshakeSlotHeld := false
-	select {
-	case s.handshakeSlots <- struct{}{}:
-		handshakeSlotHeld = true
-	case <-s.ctx.Done():
-		return
-	default:
-		// Refuse excess unauthenticated handshakes instead of allowing a burst
-		// of malformed connections to consume one goroutine and a full key/table
-		// probe for every user indefinitely.
+	source := remoteSourceAddress(raw)
+	if !s.acquireHandshakeSlot(source) {
 		return
 	}
+	handshakeSlotHeld := true
 	defer func() {
 		if handshakeSlotHeld {
-			<-s.handshakeSlots
+			s.releaseHandshakeSlot(source)
 		}
 	}()
 	entry, conn, meta, err := s.handshake(raw)
@@ -305,7 +307,7 @@ func (s *serverInstance) handle(raw net.Conn) {
 	}
 	// Established proxy sessions must not consume the unauthenticated
 	// handshake budget; release the slot as soon as authentication succeeds.
-	<-s.handshakeSlots
+	s.releaseHandshakeSlot(source)
 	handshakeSlotHeld = false
 	// HTTPMask stream/poll sessions are backed by an in-process pipe whose
 	// RemoteAddr is a synthetic "pipe" address.  Keep policy and online-user
@@ -329,11 +331,61 @@ func (s *serverInstance) handle(raw net.Conn) {
 	}
 }
 
+func (s *serverInstance) acquireHandshakeSlot(source string) bool {
+	select {
+	case s.handshakeSlots <- struct{}{}:
+	case <-s.ctx.Done():
+		return false
+	default:
+		// Refuse excess unauthenticated handshakes instead of allowing a burst
+		// of malformed connections to consume one goroutine and a full key/table
+		// probe for every user indefinitely.
+		return false
+	}
+	if source == "" {
+		return true
+	}
+	s.handshakeMu.Lock()
+	count := s.handshakesBySource[source]
+	if count >= maxConcurrentSudokuHandshakesPerSource {
+		s.handshakeMu.Unlock()
+		<-s.handshakeSlots
+		return false
+	}
+	s.handshakesBySource[source] = count + 1
+	s.handshakeMu.Unlock()
+	return true
+}
+
+func (s *serverInstance) releaseHandshakeSlot(source string) {
+	if source != "" {
+		s.handshakeMu.Lock()
+		if count := s.handshakesBySource[source]; count <= 1 {
+			delete(s.handshakesBySource, source)
+		} else {
+			s.handshakesBySource[source] = count - 1
+		}
+		s.handshakeMu.Unlock()
+	}
+	<-s.handshakeSlots
+}
+
 func remoteAddress(c net.Conn) string {
 	if c == nil || c.RemoteAddr() == nil {
 		return ""
 	}
 	return c.RemoteAddr().String()
+}
+
+func remoteSourceAddress(c net.Conn) string {
+	if c == nil || c.RemoteAddr() == nil {
+		return ""
+	}
+	address := c.RemoteAddr().String()
+	if host, _, err := net.SplitHostPort(address); err == nil {
+		return host
+	}
+	return address
 }
 
 // handshake tries the UUID-specific keys against one replayable byte stream. The Sudoku

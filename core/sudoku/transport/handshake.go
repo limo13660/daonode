@@ -321,6 +321,22 @@ func isLegacyHTTPMaskMode(mode string) bool {
 	}
 }
 
+// Shadowrocket only emits the original HTTPMask request prefix. The tunnel
+// server first checks for the newer X-Sudoku-Tunnel header and passes
+// headerless requests through, so every HTTPMask mode keeps a legacy fallback.
+// This also lets a panel configured for stream/poll/ws issue one compatible
+// sudoku:// link without pretending those mode-specific fields fit in it.
+func acceptsLegacyHTTPMaskFallback(mode string) bool {
+	// Validate() rejects unknown modes; keeping this helper permissive for all
+	// known values makes the fallback explicit and future-proof.
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "legacy", "stream", "poll", "auto", "ws":
+		return true
+	default:
+		return false
+	}
+}
+
 // ClientHandshake performs the client-side Sudoku handshake (no target request).
 func ClientHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, error) {
 	if cfg == nil {
@@ -371,7 +387,7 @@ func readFirstSessionMessage(conn net.Conn) (*KIPMessage, error) {
 }
 
 func maybeConsumeLegacyHTTPMask(rawConn net.Conn, r *bufio.Reader, cfg *ProtocolConfig) ([]byte, *SuspiciousError) {
-	if rawConn == nil || r == nil || cfg == nil || cfg.DisableHTTPMask || !isLegacyHTTPMaskMode(cfg.HTTPMaskMode) {
+	if rawConn == nil || r == nil || cfg == nil || cfg.DisableHTTPMask || !acceptsLegacyHTTPMaskFallback(cfg.HTTPMaskMode) {
 		return nil, nil
 	}
 

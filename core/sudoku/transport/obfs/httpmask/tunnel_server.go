@@ -882,7 +882,9 @@ func (s *TunnelServer) reapLater(token string) {
 			sess.pullMu.Lock()
 			lease := sess.pull
 			sess.pullMu.Unlock()
-			lease.stop()
+			if lease != nil {
+				lease.stop()
+			}
 			_ = sess.conn.Close()
 			return
 		}
@@ -943,7 +945,9 @@ func (s *TunnelServer) sessionClose(token string) {
 		sess.pullMu.Lock()
 		lease := sess.pull
 		sess.pullMu.Unlock()
-		lease.stop()
+		if lease != nil {
+			lease.stop()
+		}
 		_ = sess.conn.Close()
 	}
 }
