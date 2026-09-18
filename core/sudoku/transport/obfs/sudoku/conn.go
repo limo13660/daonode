@@ -1,3 +1,22 @@
+/*
+Copyright (C) 2026 by saba <contact me via issue>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+In addition, no derivative work may use the name or imply association
+with this application without prior consent.
+*/
 package sudoku
 
 import (
@@ -7,11 +26,15 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"github.com/limo13660/daonode/core/sudoku/transport/connutil"
 )
 
-const IOBufferSize = 32 * 1024
-
-const minDecodeReadSize = 64
+const (
+	IOBufferSize           = 32 * 1024
+	PackedIOBufferSize     = 32 * 1024
+	PackedDecodeBufferSize = 32 * 1024
+)
 
 var perm4 = [24][4]byte{
 	{0, 1, 2, 3},
@@ -48,35 +71,27 @@ type Conn struct {
 	recording  atomic.Bool
 	recordLock sync.Mutex
 
-	rawBuf      []byte
-	pendingData pendingBuffer
-	hintBuf     [4]byte
-	hintCount   int
-	writeMu     sync.Mutex
-	writeBuf    []byte
+	hintBuf   [4]byte
+	hintCount int
+	writeMu   sync.Mutex
+	writeBuf  []byte
 
 	rng              *sudokuRand
 	paddingThreshold uint64
 }
 
 func (sc *Conn) CloseWrite() error {
-	if sc == nil || sc.Conn == nil {
+	if sc == nil {
 		return nil
 	}
-	if cw, ok := sc.Conn.(interface{ CloseWrite() error }); ok {
-		return cw.CloseWrite()
-	}
-	return nil
+	return connutil.TryCloseWrite(sc.Conn)
 }
 
 func (sc *Conn) CloseRead() error {
-	if sc == nil || sc.Conn == nil {
+	if sc == nil {
 		return nil
 	}
-	if cr, ok := sc.Conn.(interface{ CloseRead() error }); ok {
-		return cr.CloseRead()
-	}
-	return nil
+	return connutil.TryCloseRead(sc.Conn)
 }
 
 func NewConn(c net.Conn, table *Table, pMin, pMax int, record bool) *Conn {
@@ -85,10 +100,6 @@ func NewConn(c net.Conn, table *Table, pMin, pMax int, record bool) *Conn {
 	sc := &Conn{
 		Conn:             c,
 		table:            table,
-		reader:           bufio.NewReaderSize(c, IOBufferSize),
-		rawBuf:           make([]byte, IOBufferSize),
-		pendingData:      newPendingBuffer(4096),
-		writeBuf:         make([]byte, 0, 4096),
 		rng:              localRng,
 		paddingThreshold: pickPaddingThreshold(localRng, pMin, pMax),
 	}
@@ -147,111 +158,43 @@ func (sc *Conn) Write(p []byte) (n int, err error) {
 	sc.writeMu.Lock()
 	defer sc.writeMu.Unlock()
 
-	sc.writeBuf = encodeSudokuPayload(sc.writeBuf[:0], sc.table, sc.rng, sc.paddingThreshold, p)
-	if _, err := sc.Conn.Write(sc.writeBuf); err != nil {
-		return len(p), err
-	}
-	return len(p), nil
+	sc.writeBuf, n, err = writeSudokuPayload(sc.Conn, sc.writeBuf, sc.table, sc.rng, sc.paddingThreshold, p)
+	return n, err
 }
 
 func (sc *Conn) Read(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if sc == nil || sc.Conn == nil || sc.reader == nil || len(sc.rawBuf) == 0 || sc.table == nil || sc.table.layout == nil {
+	if sc == nil || sc.Conn == nil || sc.table == nil || sc.table.layout == nil {
 		return 0, io.ErrClosedPipe
 	}
-	if n, ok := drainPending(p, &sc.pendingData); ok {
-		return n, nil
+	if sc.reader == nil {
+		// Directional connections also construct write-only codecs.
+		sc.reader = bufio.NewReaderSize(sc.Conn, IOBufferSize)
 	}
 
 	outN := 0
 	for {
-		nr, rErr := readRawLimited(sc.Conn, sc.reader, sc.rawBuf[:sudokuReadSize(len(p)-outN, len(sc.rawBuf))])
-		if nr > 0 {
-			chunk := sc.rawBuf[:nr]
+		chunk, rErr := peekBufferedChunk(sc.reader)
+		if len(chunk) > 0 {
+			var consumed int
+			outN, consumed, rErr = sc.decode(p, chunk)
 			if sc.recording.Load() {
 				sc.recordLock.Lock()
 				if sc.recording.Load() && sc.recorder != nil {
-					sc.recorder.Write(chunk)
+					sc.recorder.Write(chunk[:consumed])
 				}
 				sc.recordLock.Unlock()
 			}
-
-			table := sc.table
-			layout := table.layout
-			for i := 0; i < len(chunk); {
-				if sc.hintCount == 0 && outN < len(p) && i+3 < len(chunk) &&
-					layout.hintTable[chunk[i]] &&
-					layout.hintTable[chunk[i+1]] &&
-					layout.hintTable[chunk[i+2]] &&
-					layout.hintTable[chunk[i+3]] {
-					val, ok := table.DecodeMap[packHintBytes(chunk[i], chunk[i+1], chunk[i+2], chunk[i+3])]
-					if !ok {
-						return 0, ErrInvalidSudokuMapMiss
-					}
-					p[outN] = val
-					outN++
-					i += 4
-					continue
-				}
-
-				b := chunk[i]
-				i++
-				if !layout.hintTable[b] {
-					continue
-				}
-
-				sc.hintBuf[sc.hintCount] = b
-				sc.hintCount++
-				if sc.hintCount != len(sc.hintBuf) {
-					continue
-				}
-
-				val, ok := table.DecodeMap[packHintBytes(sc.hintBuf[0], sc.hintBuf[1], sc.hintBuf[2], sc.hintBuf[3])]
-				if !ok {
-					return 0, ErrInvalidSudokuMapMiss
-				}
-				outN = appendDecodedByte(p, outN, &sc.pendingData, val)
-				sc.hintCount = 0
-			}
+			_, _ = sc.reader.Discard(consumed)
 		}
 
 		if rErr != nil {
-			if outN > 0 {
-				return outN, nil
-			}
-			if n, ok := drainPending(p, &sc.pendingData); ok {
-				return n, nil
-			}
 			return 0, rErr
 		}
 		if outN > 0 {
 			return outN, nil
 		}
 	}
-}
-
-func sudokuReadSize(decodedRemaining, maxRaw int) int {
-	if maxRaw <= minDecodeReadSize || decodedRemaining <= 0 {
-		return maxRaw
-	}
-	if decodedRemaining > (maxRaw-minDecodeReadSize)/9 {
-		return maxRaw
-	}
-
-	return decodedRemaining*9 + minDecodeReadSize
-}
-
-func readRawLimited(conn net.Conn, reader *bufio.Reader, dst []byte) (int, error) {
-	if len(dst) == 0 {
-		return 0, nil
-	}
-	if reader != nil && reader.Buffered() > 0 {
-		return reader.Read(dst)
-	}
-	if conn == nil {
-		return 0, io.ErrClosedPipe
-	}
-	return conn.Read(dst)
 }
