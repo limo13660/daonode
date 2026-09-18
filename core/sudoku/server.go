@@ -454,6 +454,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 					}
 					return userConfig{}, nil, nil, err
 				}
+				replay.Commit()
 				return entry, conn, meta, nil
 			}
 			if transport.HTTPMaskRejected(wrapped) {
@@ -471,6 +472,8 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 				cfg.HandshakeTimeoutSeconds = maxInt(1, int((time.Until(deadline)+time.Second-1)/time.Second))
 				conn, meta, err := transport.ServerHandshake(passThroughReplay, &cfg)
 				if err == nil && meta != nil && meta.UserHash == transport.KIPUserHashHexFromKey(entry.user.Uuid) {
+					passThroughReplay.Commit()
+					replay.Commit()
 					return entry, conn, meta, nil
 				}
 				if conn != nil {
@@ -522,6 +525,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 				replay.Reset()
 				continue
 			}
+			replay.Commit()
 			return entry, conn, meta, nil
 		}
 		replay.Reset()
@@ -808,27 +812,59 @@ func (s *serverInstance) Close() error {
 
 type replayConn struct {
 	net.Conn
-	mu     sync.Mutex
-	cache  []byte
-	offset int
+	mu        sync.Mutex
+	cache     []byte
+	offset    int
+	recording bool
 }
 
-func newReplayConn(c net.Conn) *replayConn { return &replayConn{Conn: c} }
+const maxReplayCacheBytes = 256 * 1024
+
+func newReplayConn(c net.Conn) *replayConn { return &replayConn{Conn: c, recording: true} }
 func (r *replayConn) Read(p []byte) (int, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	if !r.recording {
+		r.mu.Unlock()
+		return r.Conn.Read(p)
+	}
 	if r.offset < len(r.cache) {
 		n := copy(p, r.cache[r.offset:])
 		r.offset += n
+		r.mu.Unlock()
 		return n, nil
 	}
 	n, e := r.Conn.Read(p)
 	if n > 0 {
+		if len(r.cache)+n > maxReplayCacheBytes {
+			r.mu.Unlock()
+			return n, fmt.Errorf("Sudoku handshake replay buffer exceeded %d bytes", maxReplayCacheBytes)
+		}
 		r.cache = append(r.cache, p[:n]...)
 		r.offset += n
 	}
+	r.mu.Unlock()
 	return n, e
 }
-func (r *replayConn) Reset() { r.mu.Lock(); r.offset = 0; r.mu.Unlock() }
+func (r *replayConn) Reset() {
+	r.mu.Lock()
+	if r.recording {
+		r.offset = 0
+	}
+	r.mu.Unlock()
+}
+
+// Commit ends the handshake replay window. Once authentication succeeds, the
+// connection is a normal proxy stream and retaining every subsequent byte in
+// the replay cache would grow memory without bound for long-lived sessions.
+func (r *replayConn) Commit() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.recording = false
+	r.cache = nil
+	r.offset = 0
+	r.mu.Unlock()
+}
 
 var _ io.ReadWriter = (*replayConn)(nil)

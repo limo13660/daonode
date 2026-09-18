@@ -207,6 +207,7 @@ func WriteRandomRequestHeaderWithPathRoot(w io.Writer, host string, pathRoot str
 // ConsumeHeader 读取并消耗 HTTP 头部，返回消耗的数据和剩余的 reader 数据
 // 如果不是 POST 请求或格式严重错误，返回 error
 func ConsumeHeader(r *bufio.Reader) ([]byte, error) {
+	const maxHeaderBytes = 32 * 1024
 	var consumed bytes.Buffer
 
 	// 1. 读取请求行
@@ -214,6 +215,9 @@ func ConsumeHeader(r *bufio.Reader) ([]byte, error) {
 	line, err := r.ReadSlice('\n')
 	if err != nil {
 		return nil, err
+	}
+	if len(line) > maxHeaderBytes {
+		return nil, fmt.Errorf("http header too large")
 	}
 	consumed.Write(line)
 
@@ -236,6 +240,9 @@ func ConsumeHeader(r *bufio.Reader) ([]byte, error) {
 		line, err = r.ReadSlice('\n')
 		if err != nil {
 			return consumed.Bytes(), err
+		}
+		if consumed.Len()+len(line) > maxHeaderBytes {
+			return consumed.Bytes(), fmt.Errorf("http header too large")
 		}
 		consumed.Write(line)
 
