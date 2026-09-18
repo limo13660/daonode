@@ -10,8 +10,21 @@ import (
 )
 
 type HTTPMaskTunnelServer struct {
-	cfg *ProtocolConfig
-	ts  *httpmask.TunnelServer
+	cfg        *ProtocolConfig
+	ts         *httpmask.TunnelServer
+	byUserHash map[string]*ProtocolConfig
+}
+
+// EarlyHandshakeUserHash exposes the UUID tag attached to a connection after
+// an HTTPMask authorize/upgrade request has carried the encrypted Sudoku hello.
+func EarlyHandshakeUserHash(conn net.Conn) (string, bool) {
+	return httpmask.EarlyHandshakeUserHash(conn)
+}
+
+// HTTPMaskRejected reports whether a recognized tunnel request failed its
+// mode, path, token or early-handshake validation.
+func HTTPMaskRejected(conn net.Conn) bool {
+	return httpmask.IsRejectedConnection(conn)
 }
 
 func newHTTPMaskEarlyCodecConfig(cfg *ProtocolConfig, psk string) EarlyCodecConfig {
@@ -46,6 +59,66 @@ func NewHTTPMaskTunnelServer(cfg *ProtocolConfig) *HTTPMaskTunnelServer {
 
 func NewHTTPMaskTunnelServerWithFallback(cfg *ProtocolConfig) *HTTPMaskTunnelServer {
 	return newHTTPMaskTunnelServer(cfg, true)
+}
+
+// NewHTTPMaskMultiUserTunnelServerWithFallback creates one HTTP tunnel
+// listener for a set of UUID-specific Sudoku configurations. The early
+// handshake is tried against the keys in memory before a tunnel session is
+// created, so a connection is never opened in every user's tunnel while the
+// server searches for the matching UUID.
+func NewHTTPMaskMultiUserTunnelServerWithFallback(configs []*ProtocolConfig) *HTTPMaskTunnelServer {
+	return newHTTPMaskMultiUserTunnelServer(configs, true)
+}
+
+func newHTTPMaskMultiUserTunnelServer(configs []*ProtocolConfig, passThroughOnReject bool) *HTTPMaskTunnelServer {
+	if len(configs) == 0 {
+		return &HTTPMaskTunnelServer{}
+	}
+	base := configs[0]
+	if base == nil {
+		return &HTTPMaskTunnelServer{}
+	}
+	byUserHash := make(map[string]*ProtocolConfig, len(configs))
+	for _, cfg := range configs {
+		if cfg == nil || cfg.DisableHTTPMask || strings.EqualFold(strings.TrimSpace(cfg.HTTPMaskMode), "") || strings.EqualFold(strings.TrimSpace(cfg.HTTPMaskMode), "legacy") {
+			continue
+		}
+		byUserHash[KIPUserHashHexFromKey(cfg.Key)] = cfg
+	}
+	if len(byUserHash) == 0 {
+		return &HTTPMaskTunnelServer{cfg: base}
+	}
+
+	// Stream/poll do not need a second HTTP auth layer. WebSocket clients send
+	// the per-key auth token, but the Sudoku early payload is the authoritative
+	// credential when several UUIDs share one listener, so leave AuthKey empty.
+	early := &httpmask.TunnelServerEarlyHandshake{Prepare: func(payload []byte) (*httpmask.PreparedServerEarlyHandshake, error) {
+		var firstErr error
+		for _, cfg := range byUserHash {
+			prepared, err := NewHTTPMaskServerEarlyHandshake(
+				newHTTPMaskEarlyCodecConfig(cfg, ServerAEADSeed(cfg.Key)),
+				cfg.tableCandidates(),
+				globalHandshakeReplay.allow,
+			).Prepare(payload)
+			if err == nil {
+				return prepared, nil
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("no Sudoku user matched HTTPMask early handshake")
+		}
+		return nil, firstErr
+	}}
+	ts := httpmask.NewTunnelServer(httpmask.TunnelServerOptions{
+		Mode:                base.HTTPMaskMode,
+		PathRoot:            base.HTTPMaskPathRoot,
+		EarlyHandshake:      early,
+		PassThroughOnReject: passThroughOnReject,
+	})
+	return &HTTPMaskTunnelServer{cfg: base, ts: ts, byUserHash: byUserHash}
 }
 
 func newHTTPMaskTunnelServer(cfg *ProtocolConfig, passThroughOnReject bool) *HTTPMaskTunnelServer {
@@ -109,7 +182,19 @@ func (s *HTTPMaskTunnelServer) WrapConn(rawConn net.Conn) (handshakeConn net.Con
 	case httpmask.HandlePassThrough:
 		return c, s.cfg, false, nil
 	case httpmask.HandleStartTunnel:
-		inner := *s.cfg
+		selected := s.cfg
+		if userHash, ok := httpmask.EarlyHandshakeUserHash(c); ok && s.byUserHash != nil {
+			selected = s.byUserHash[userHash]
+			if selected == nil {
+				_ = c.Close()
+				return nil, nil, true, fmt.Errorf("unknown Sudoku HTTPMask user hash")
+			}
+		}
+		if selected == nil {
+			_ = c.Close()
+			return nil, nil, true, fmt.Errorf("missing Sudoku HTTPMask configuration")
+		}
+		inner := *selected
 		inner.DisableHTTPMask = true
 		// HTTPMask tunnel modes (stream/poll/auto/ws) add extra round trips before the first
 		// handshake bytes can reach ServerHandshake, especially under high concurrency.

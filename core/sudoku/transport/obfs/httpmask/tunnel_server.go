@@ -409,6 +409,17 @@ func newRejectedPreBufferedConn(conn net.Conn, pre []byte) *preBufferedConn {
 
 func (p *preBufferedConn) IsHTTPMaskRejected() bool { return p.rejected }
 
+// IsRejectedConnection reports whether conn contains a recognized HTTPMask
+// request that failed tunnel validation. Callers should reject these streams
+// directly instead of feeding the replayed HTTP bytes into every protocol key.
+func IsRejectedConnection(conn net.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	rejected, ok := conn.(interface{ IsHTTPMaskRejected() bool })
+	return ok && rejected.IsHTTPMaskRejected()
+}
+
 func (p *preBufferedConn) GetBufferedAndRecorded() []byte {
 	if len(p.recorded) == 0 {
 		return nil

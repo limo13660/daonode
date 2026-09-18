@@ -209,6 +209,33 @@ func TestBuildUserConfigsReusesHTTPMaskSessionsForUnchangedUsers(t *testing.T) {
 	}
 }
 
+func TestBuildUserConfigsSharesHTTPMaskTunnelAcrossUsers(t *testing.T) {
+	info := sudokuNodeInfo()
+	info.Common.ProtocolSettings.HTTPMask = true
+	info.Common.ProtocolSettings.HTTPMaskMode = "stream"
+	users := map[int]panel.UserInfo{
+		1: {Id: 1, Uuid: "4b9edc89-cf4c-4210-bd8e-e8db8a3731ad"},
+		2: {Id: 2, Uuid: "959df3cf-197d-4b6d-be9f-1b4ec3ad4e9f"},
+		3: {Id: 3, Uuid: "50793b13-733c-49b9-aa4b-5f7006bc22c4"},
+	}
+	snapshot, err := buildUserConfigs(info, users)
+	if err != nil {
+		t.Fatalf("buildUserConfigs() error = %v", err)
+	}
+	if len(snapshot.entries) != len(users) {
+		t.Fatalf("entries = %d, want %d", len(snapshot.entries), len(users))
+	}
+	shared := snapshot.entries[0].tunnel
+	if shared == nil {
+		t.Fatal("HTTPMask tunnel was not created")
+	}
+	for i, entry := range snapshot.entries[1:] {
+		if entry.tunnel != shared {
+			t.Fatalf("user entry %d has a distinct HTTPMask tunnel", i+2)
+		}
+	}
+}
+
 func TestRuntimeStopClosesStalledSudokuHandshake(t *testing.T) {
 	limiter.Init()
 	info := sudokuNodeInfo()
