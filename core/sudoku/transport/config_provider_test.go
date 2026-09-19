@@ -31,7 +31,7 @@ func TestTableProviderBuildsOnceConcurrently(t *testing.T) {
 	}
 }
 
-func TestTableProviderKeepsTablesAfterRelease(t *testing.T) {
+func TestTableProviderReleasesTablesAfterFailedAttempt(t *testing.T) {
 	var calls int
 	provider := NewTableProvider(func() ([]*obfssudoku.Table, error) {
 		calls++
@@ -42,9 +42,9 @@ func TestTableProviderKeepsTablesAfterRelease(t *testing.T) {
 	}
 	provider.Release()
 	if _, err := provider.Tables(); err != nil {
-		t.Fatalf("second read: %v", err)
+		t.Fatalf("second build: %v", err)
 	}
-	if calls != 1 {
-		t.Fatalf("table provider rebuilt after failed-attempt release: %d builds", calls)
+	if calls != 2 {
+		t.Fatalf("table provider builds = %d, want 2 after release", calls)
 	}
 }

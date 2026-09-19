@@ -59,6 +59,11 @@ type TunnelServer struct {
 
 const tunnelHeaderReadTimeout = 15 * time.Second
 
+// Bound authorize requests that never reach a usable Sudoku stream. Each
+// session owns a pipe pair and a reaper goroutine; without a cap, a client
+// retry storm can retain hundreds of megabytes before SessionTTL runs.
+const maxTunnelSessions = 256
+
 type tunnelSession struct {
 	conn           net.Conn
 	lastActive     time.Time
@@ -811,6 +816,14 @@ func (s *TunnelServer) sessionAuthorize(rawConn net.Conn, headerBytes, buffered,
 		_ = rawConn.Close()
 		return HandleDone, nil, net.ErrClosed
 	}
+	if len(s.sessions) >= maxTunnelSessions {
+		s.mu.Unlock()
+		_ = c1.Close()
+		_ = c2.Close()
+		_ = writeSimpleHTTPResponse(rawConn, http.StatusTooManyRequests, "too many sessions")
+		_ = rawConn.Close()
+		return HandleDone, nil, nil
+	}
 	s.sessions[token] = &tunnelSession{conn: c2, closed: make(chan struct{}), lastActive: time.Now(), nextUploadSeq: 1}
 	s.mu.Unlock()
 
@@ -865,18 +878,18 @@ func (s *TunnelServer) reapLater(token string) {
 		idle := time.Since(sess.lastActive)
 		s.mu.Unlock()
 
-		// Pull ownership has its own lock. Do not take it while holding s.mu:
-		// pull takeover validates the session while holding pullMu.
-		sess.pullMu.Lock()
-		active := sess.pull != nil
-		sess.pullMu.Unlock()
-
 		s.mu.Lock()
 		if s.sessions[token] != sess {
 			s.mu.Unlock()
 			return
 		}
-		if idle >= ttl && !active {
+		// A pull lease represents one HTTP request, not proof that the client
+		// is still alive. If the peer disappears without sending the close
+		// control request, the lease can remain present until the underlying
+		// socket notices it. Expire by last activity even while a lease is
+		// present so abandoned sessions cannot retain their pipe and reaper
+		// goroutine indefinitely.
+		if idle >= ttl {
 			delete(s.sessions, token)
 			s.mu.Unlock()
 			sess.pullMu.Lock()
@@ -889,9 +902,6 @@ func (s *TunnelServer) reapLater(token string) {
 			return
 		}
 		next := ttl - idle
-		if active && next < ttl {
-			next = ttl
-		}
 		s.mu.Unlock()
 
 		// Avoid a tight loop under high-frequency activity; we only need best-effort cleanup.
