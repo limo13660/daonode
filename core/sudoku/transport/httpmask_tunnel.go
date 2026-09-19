@@ -103,6 +103,7 @@ func newHTTPMaskMultiUserTunnelServer(configs []*ProtocolConfig, passThroughOnRe
 			if err == nil {
 				return prepared, nil
 			}
+			cfg.ReleaseTableCandidates()
 			if firstErr == nil {
 				firstErr = err
 			}

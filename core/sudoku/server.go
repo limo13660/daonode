@@ -16,6 +16,7 @@ import (
 	"github.com/limo13660/daonode/core/contract"
 	"github.com/limo13660/daonode/core/shared"
 	transport "github.com/limo13660/daonode/core/sudoku/transport"
+	sudokuobfs "github.com/limo13660/daonode/core/sudoku/transport/obfs/sudoku"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -36,6 +37,10 @@ var errHTTPMaskHandled = errors.New("Sudoku HTTPMask control connection handled"
 // X25519). Keep unauthenticated work bounded so a burst of probes cannot
 // starve established proxy sessions or make the host appear hung.
 const (
+	// Small nodes commonly have only a handful of users. Keep their historical
+	// eager configuration behavior (and make validation failures visible during
+	// sync), while large panel user lists use the lazy provider below.
+	eagerSudokuTableUserLimit = 8
 	// Keep the expensive unauthenticated path small on low-memory nodes. A
 	// single Shadowrocket client can open several probes and reconnects at once.
 	maxConcurrentSudokuHandshakes = 8
@@ -77,10 +82,10 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 	}
 	tableType := strings.TrimSpace(ps.TableType)
 	if tableType == "" {
-		// DaoBoard and the official Sudoku config default to the entropy table.
-		// Keep this fallback aligned so a legacy panel response that omits
-		// table_type can still complete the handshake.
-		tableType = "prefer_entropy"
+		// The official easy-install server defaults to ASCII on the uplink and
+		// entropy on the downlink. Shadowrocket's sudoku:// importer follows
+		// this directional default because the URI has no table-type field.
+		tableType = "up_ascii_down_entropy"
 	}
 	normalizedTableType, err := transport.NormalizeTableType(tableType)
 	if err != nil {
@@ -121,11 +126,36 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 			out.entries = append(out.entries, previousEntry)
 			continue
 		}
-		tables, err := transport.NewServerTablesWithCustomPatterns(transport.ServerAEADSeed(key), tableType, ps.CustomTable, ps.CustomTables)
-		if err != nil {
-			return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, err)
+		// Do not construct the full Sudoku DecodeMap while loading the panel
+		// user list. A node can receive hundreds of UUIDs although only one is
+		// active; the first handshake will build and cache this user's tables.
+		// Validate the inexpensive mode/pattern values now so a bad panel
+		// response is rejected during sync instead of at connection time.
+		if _, err := transport.NormalizeTableType(tableType); err != nil {
+			return nil, fmt.Errorf("validate Sudoku table type for user %d: %w", user.Id, err)
 		}
-		cfg.Tables = tables
+		patterns := append([]string(nil), ps.CustomTables...)
+		customTable := ps.CustomTable
+		userInfo := user
+		cfg.TableProvider = transport.NewTableProvider(func() ([]*sudokuobfs.Table, error) {
+			started := time.Now()
+			tables, buildErr := transport.NewServerTablesWithCustomPatterns(transport.ServerAEADSeed(key), tableType, customTable, patterns)
+			fields := log.Fields{"protocol": "sudoku", "user_id": userInfo.Id, "table_type": tableType, "table_count": len(tables), "elapsed": time.Since(started).String()}
+			if buildErr != nil {
+				log.WithFields(fields).WithError(buildErr).Warn("Sudoku table build failed")
+			} else {
+				log.WithFields(fields).Info("Sudoku table built lazily")
+			}
+			return tables, buildErr
+		})
+		if len(users) <= eagerSudokuTableUserLimit {
+			tables, buildErr := cfg.TableProvider.Tables()
+			if buildErr != nil {
+				return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, buildErr)
+			}
+			cfg.Tables = tables
+			cfg.TableProvider = nil
+		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate Sudoku user %d: %w", user.Id, err)
 		}
@@ -258,7 +288,7 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int)}
 	s.users.Store(users)
 	go s.serve()
-	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash)}).Info("Sudoku runtime started")
+	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash), "lazy_tables": len(users.byHash) > eagerSudokuTableUserLimit}).Info("Sudoku runtime started")
 	return s, nil
 }
 
@@ -476,6 +506,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 					replay.Commit()
 					return entry, conn, meta, nil
 				}
+				cfg.ReleaseTableCandidates()
 				if conn != nil {
 					_ = conn.Close()
 				}
@@ -522,12 +553,14 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 		if err == nil {
 			if meta == nil || meta.UserHash != transport.KIPUserHashHexFromKey(entry.user.Uuid) {
 				_ = conn.Close()
+				cfg.ReleaseTableCandidates()
 				replay.Reset()
 				continue
 			}
 			replay.Commit()
 			return entry, conn, meta, nil
 		}
+		cfg.ReleaseTableCandidates()
 		replay.Reset()
 	}
 	return userConfig{}, nil, nil, errors.New("Sudoku handshake rejected")

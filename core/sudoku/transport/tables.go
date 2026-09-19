@@ -70,18 +70,21 @@ func NewServerTablesWithCustomPatterns(key string, tableType string, customTable
 	}
 
 	// Shadowrocket's sudoku:// URI does not carry the ASCII/table preference.
-	// When the panel has no custom table, accept the two built-in defaults so
-	// existing nodes configured as prefer_ascii can also accept URI clients
-	// whose implementation defaults to prefer_entropy (and vice versa).
+	// When the panel has no custom table, accept the other built-in directions
+	// as probes too so URI clients and older Mihomo clients can coexist.
 	if strings.TrimSpace(customTable) == "" && len(customTables) == 0 {
-		fallbackType := ""
+		fallbackTypes := []string{}
 		switch strings.ToLower(strings.TrimSpace(tableType)) {
 		case "prefer_ascii":
-			fallbackType = "prefer_entropy"
+			fallbackTypes = []string{"up_ascii_down_entropy"}
 		case "prefer_entropy":
-			fallbackType = "prefer_ascii"
+			fallbackTypes = []string{"up_ascii_down_entropy"}
+		case "up_ascii_down_entropy":
+			fallbackTypes = []string{"prefer_entropy"}
+		case "up_entropy_down_ascii":
+			fallbackTypes = []string{"prefer_entropy"}
 		}
-		if fallbackType != "" {
+		for _, fallbackType := range fallbackTypes {
 			fallback, fallbackErr := NewTableWithCustom(key, fallbackType, "")
 			if fallbackErr != nil {
 				return nil, fallbackErr

@@ -156,7 +156,7 @@ func newSingleDirectionTable(key string, mode string, customPattern string) (*Ta
 	// 构建映射表
 	for byteVal := 0; byteVal < 256; byteVal++ {
 		targetGrid := shuffledGrids[byteVal]
-		for _, positions := range uniquePositions[targetGrid] {
+		for positionIndex, positions := range uniquePositions[targetGrid] {
 			var currentHints [4]byte
 
 			// 1. 计算抽象提示 (Abstract Hints)
@@ -173,7 +173,14 @@ func newSingleDirectionTable(key string, mode string, customPattern string) (*Ta
 				currentHints[i] = t.layout.hintByte(p.val-1, p.pos)
 			}
 
-			t.EncodeTable[byteVal] = append(t.EncodeTable[byteVal], currentHints)
+			// The decoder must retain every valid clue combination so that
+			// clients using the official implementation remain compatible.
+			// The encoder only needs one valid combination per byte. Keeping all
+			// 22k combinations in EncodeTable multiplied memory by several MB for
+			// every panel UUID, even though the wire format does not require them.
+			if positionIndex == 0 {
+				t.EncodeTable[byteVal] = append(t.EncodeTable[byteVal], currentHints)
+			}
 			// 生成解码键 (需要对 Hints 进行排序以忽略传输顺序)
 			key := packHintsToKey(currentHints)
 			t.DecodeMap[key] = byte(byteVal)

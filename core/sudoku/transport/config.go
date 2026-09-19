@@ -3,9 +3,80 @@ package sudoku
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/limo13660/daonode/core/sudoku/transport/obfs/sudoku"
 )
+
+// TableProvider lazily builds a user's Sudoku table candidates on the first
+// handshake.  A panel node may contain thousands of UUIDs while only a small
+// number are active; eagerly allocating every DecodeMap makes the daemon's
+// resident memory proportional to the whole panel instead of active users.
+// The result is cached for the lifetime of the configuration snapshot.
+type TableProvider struct {
+	mu    sync.Mutex
+	ready chan struct{}
+	busy  bool
+	build func() ([]*sudoku.Table, error)
+	table []*sudoku.Table
+	err   error
+}
+
+// NewTableProvider returns a concurrency-safe lazy table builder.
+func NewTableProvider(build func() ([]*sudoku.Table, error)) *TableProvider {
+	if build == nil {
+		return nil
+	}
+	return &TableProvider{build: build}
+}
+
+func (p *TableProvider) Tables() ([]*sudoku.Table, error) {
+	if p == nil || p.build == nil {
+		return nil, fmt.Errorf("table provider is nil")
+	}
+	for {
+		p.mu.Lock()
+		if p.table != nil || p.err != nil {
+			tables, err := p.table, p.err
+			p.mu.Unlock()
+			return tables, err
+		}
+		if p.busy {
+			ready := p.ready
+			p.mu.Unlock()
+			<-ready
+			continue
+		}
+		p.busy = true
+		p.ready = make(chan struct{})
+		ready := p.ready
+		p.mu.Unlock()
+
+		tables, err := p.build()
+		if err == nil && len(tables) == 0 {
+			err = fmt.Errorf("table provider returned no tables")
+		}
+		p.mu.Lock()
+		p.table, p.err, p.busy = tables, err, false
+		close(ready)
+		p.mu.Unlock()
+	}
+}
+
+// Release drops a successfully built table set after a failed handshake.
+// This prevents probing a large UUID list from retaining one full DecodeMap
+// for every non-matching key. A successful connection leaves its provider
+// cached for subsequent sessions.
+func (p *TableProvider) Release() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if !p.busy && p.err == nil {
+		p.table = nil
+	}
+	p.mu.Unlock()
+}
 
 // ProtocolConfig defines the configuration for the Sudoku protocol stack.
 // It is intentionally kept close to the upstream Sudoku project to ensure wire compatibility.
@@ -27,6 +98,10 @@ type ProtocolConfig struct {
 	// probe the handshake to detect which one was used, keeping the handshake format unchanged.
 	// When Tables is set, Table may be nil.
 	Tables []*sudoku.Table
+
+	// TableProvider is an optional lazy equivalent of Tables. It is primarily
+	// used by the server; clients may continue to populate Tables directly.
+	TableProvider *TableProvider
 
 	// Padding insertion ratio (0-100). Must satisfy PaddingMax >= PaddingMin.
 	PaddingMin int
@@ -76,7 +151,7 @@ type ProtocolConfig struct {
 }
 
 func (c *ProtocolConfig) Validate() error {
-	if c.Table == nil && len(c.Tables) == 0 {
+	if c.Table == nil && len(c.Tables) == 0 && c.TableProvider == nil {
 		return fmt.Errorf("table cannot be nil (or provide tables)")
 	}
 	for i, t := range c.Tables {
@@ -247,5 +322,31 @@ func (c *ProtocolConfig) tableCandidates() []*sudoku.Table {
 	if c.Table != nil {
 		return []*sudoku.Table{c.Table}
 	}
+	if c.TableProvider != nil {
+		tables, _ := c.TableProvider.Tables()
+		return tables
+	}
 	return nil
+}
+
+func (c *ProtocolConfig) resolveTableCandidates() ([]*sudoku.Table, error) {
+	if c == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+	if len(c.Tables) > 0 {
+		return c.Tables, nil
+	}
+	if c.Table != nil {
+		return []*sudoku.Table{c.Table}, nil
+	}
+	if c.TableProvider != nil {
+		return c.TableProvider.Tables()
+	}
+	return nil, fmt.Errorf("no table candidates")
+}
+
+func (c *ProtocolConfig) ReleaseTableCandidates() {
+	if c != nil && len(c.Tables) == 0 && c.Table == nil && c.TableProvider != nil {
+		c.TableProvider.Release()
+	}
 }
