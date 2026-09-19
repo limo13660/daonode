@@ -44,11 +44,11 @@ const (
 	// Keep the expensive unauthenticated path small on low-memory nodes. A
 	// single Shadowrocket client can open several probes and reconnects at once.
 	maxConcurrentSudokuHandshakes = 4
-	// Shadowrocket opens several speculative sockets while importing a node.
-	// Legacy HTTPMask handshakes cannot carry the UUID hash up front and may
-	// probe every configured user, so allowing eight probes from one source
-	// multiplies the expensive table/AEAD work and can starve the host.
-	maxConcurrentSudokuHandshakesPerSource = 2
+	// HTTPMask stream/poll uses several TCP sockets for one logical connection
+	// (authorize, long-poll and upload). Keep enough per-source capacity for
+	// those control sockets plus one real Sudoku handshake, while the global
+	// limit still bounds the expensive table/AEAD work.
+	maxConcurrentSudokuHandshakesPerSource = 4
 )
 
 type serverInstance struct {
