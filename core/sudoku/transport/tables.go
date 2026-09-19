@@ -75,13 +75,26 @@ func NewServerTablesWithCustomPatterns(key string, tableType string, customTable
 		return nil, err
 	}
 
-	// Do not silently expand an unconfigured server into several table modes.
-	// A table contains a large DecodeMap; doing this for every UUID during a
-	// multi-user probe multiplies the allocation by the number of panel users
-	// and can exhaust a small node. Official Sudoku clients carry their table
-	// preference in the configuration/URI (and default to prefer_entropy), so
-	// the panel's selected mode is the only implicit candidate. Explicit
-	// custom_tables remain supported above and are intentionally probeable.
+	// sudoku:// links used by Shadowrocket do not always carry the table mode.
+	// Keep the official compatibility candidates, but build them lazily per UUID
+	// and release them after a failed probe. This preserves native clients while
+	// keeping memory proportional to active handshake attempts instead of the
+	// entire panel user list.
+	if strings.TrimSpace(customTable) == "" && len(customTables) == 0 {
+		fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy"}
+		seenTypes := map[string]struct{}{strings.ToLower(strings.TrimSpace(tableType)): {}}
+		for _, fallbackType := range fallbackTypes {
+			if _, exists := seenTypes[fallbackType]; exists {
+				continue
+			}
+			seenTypes[fallbackType] = struct{}{}
+			fallback, fallbackErr := NewTableWithCustom(key, fallbackType, "")
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			tables = append(tables, fallback)
+		}
+	}
 	return tables, nil
 }
 
