@@ -2,7 +2,7 @@ package sudoku
 
 import "testing"
 
-func TestServerTablesAcceptShadowrocketDefaultsAndIgnoreInvalidPattern(t *testing.T) {
+func TestServerTablesIgnoreInvalidPatternAndKeepConfiguredMode(t *testing.T) {
 	tables, err := NewServerTablesWithCustomPatterns(
 		"shadowrocket-key",
 		"prefer_entropy",
@@ -12,31 +12,25 @@ func TestServerTablesAcceptShadowrocketDefaultsAndIgnoreInvalidPattern(t *testin
 	if err != nil {
 		t.Fatalf("NewServerTablesWithCustomPatterns() error = %v", err)
 	}
-	if len(tables) != 3 {
-		t.Fatalf("got %d server tables, want symmetric and directional compatibility candidates", len(tables))
+	if len(tables) != 1 {
+		t.Fatalf("got %d server tables, want one configured candidate", len(tables))
 	}
 }
 
-func TestServerTablesAcceptsURIWithoutTableType(t *testing.T) {
+func TestServerTablesRequireMatchingURIWithoutExplicitTableType(t *testing.T) {
 	server, err := NewServerTablesWithCustomPatterns("uri-key", "prefer_entropy", "", nil)
 	if err != nil {
 		t.Fatalf("build server tables: %v", err)
 	}
-	client, err := NewClientTablesWithCustomPatterns("uri-key", "prefer_ascii", "", nil)
+	client, err := NewClientTablesWithCustomPatterns("uri-key", "prefer_entropy", "", nil)
 	if err != nil {
 		t.Fatalf("build client tables: %v", err)
 	}
-	for _, want := range client {
-		found := false
-		for _, candidate := range server {
-			if candidate.Hint() == want.Hint() {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("server did not accept URI client table hint %d", want.Hint())
-		}
+	if len(server) != 1 || len(client) != 1 {
+		t.Fatalf("server tables=%d client tables=%d, want one each", len(server), len(client))
+	}
+	if server[0].Hint() != client[0].Hint() {
+		t.Fatalf("server and client selected different table hints: %d != %d", server[0].Hint(), client[0].Hint())
 	}
 }
 

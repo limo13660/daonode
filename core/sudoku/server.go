@@ -49,6 +49,10 @@ const (
 	// those control sockets plus one real Sudoku handshake, while the global
 	// limit still bounds the expensive table/AEAD work.
 	maxConcurrentSudokuHandshakesPerSource = 4
+	// A bad table/key or non-Sudoku probe can otherwise reconnect in a tight
+	// loop and repeat the full multi-user search forever. A short source
+	// cooldown bounds that failure mode without delaying an established client.
+	sudokuHandshakeFailureCooldown = 2 * time.Second
 )
 
 type serverInstance struct {
@@ -67,6 +71,9 @@ type serverInstance struct {
 	handshakeSlots     chan struct{}
 	handshakeMu        sync.Mutex
 	handshakesBySource map[string]int
+	handshakeBlocked   map[string]time.Time
+	preferredUserMu    sync.Mutex
+	preferredUserHash  string
 	handshakeLogMu     sync.Mutex
 	handshakeLogAt     map[string]time.Time
 }
@@ -289,7 +296,7 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 		return nil, fmt.Errorf("listen for Sudoku server: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int), handshakeLogAt: make(map[string]time.Time)}
+	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int), handshakeBlocked: make(map[string]time.Time), handshakeLogAt: make(map[string]time.Time)}
 	s.users.Store(users)
 	go s.serve()
 	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash), "lazy_tables": len(users.byHash) > eagerSudokuTableUserLimit}).Info("Sudoku runtime started")
@@ -374,6 +381,7 @@ func (s *serverInstance) logHandshakeFailure(source string, err error) {
 	if s == nil || err == nil {
 		return
 	}
+	s.blockHandshakeSource(source)
 	key := source
 	if key == "" {
 		key = "unknown"
@@ -395,6 +403,19 @@ func (s *serverInstance) logHandshakeFailure(source string, err error) {
 }
 
 func (s *serverInstance) acquireHandshakeSlot(source string) bool {
+	if source != "" {
+		s.handshakeMu.Lock()
+		blockedUntil := s.handshakeBlocked[source]
+		now := time.Now()
+		if now.Before(blockedUntil) {
+			s.handshakeMu.Unlock()
+			return false
+		}
+		if !blockedUntil.IsZero() {
+			delete(s.handshakeBlocked, source)
+		}
+		s.handshakeMu.Unlock()
+	}
 	select {
 	case s.handshakeSlots <- struct{}{}:
 	case <-s.ctx.Done():
@@ -418,6 +439,32 @@ func (s *serverInstance) acquireHandshakeSlot(source string) bool {
 	s.handshakesBySource[source] = count + 1
 	s.handshakeMu.Unlock()
 	return true
+}
+
+func (s *serverInstance) blockHandshakeSource(source string) {
+	if s == nil || source == "" {
+		return
+	}
+	s.handshakeMu.Lock()
+	if len(s.handshakeBlocked) >= 4096 {
+		now := time.Now()
+		for key, until := range s.handshakeBlocked {
+			if !now.Before(until) {
+				delete(s.handshakeBlocked, key)
+			}
+		}
+	}
+	s.handshakeBlocked[source] = time.Now().Add(sudokuHandshakeFailureCooldown)
+	s.handshakeMu.Unlock()
+}
+
+func (s *serverInstance) unblockHandshakeSource(source string) {
+	if s == nil || source == "" {
+		return
+	}
+	s.handshakeMu.Lock()
+	delete(s.handshakeBlocked, source)
+	s.handshakeMu.Unlock()
 }
 
 func (s *serverInstance) releaseHandshakeSlot(source string) {
@@ -451,6 +498,44 @@ func remoteSourceAddress(c net.Conn) string {
 	return address
 }
 
+// handshakeEntries puts the last successfully authenticated UUID first. A
+// raw Sudoku hello hides the UUID until the server has tried the table/key, so
+// the first ever connection may still probe the configured users. Once a
+// client succeeds, reconnects should not repeat an O(number-of-users) probe.
+func (s *serverInstance) handshakeEntries(snapshot *userConfigSnapshot) []userConfig {
+	if snapshot == nil || len(snapshot.entries) == 0 {
+		return nil
+	}
+	s.preferredUserMu.Lock()
+	preferred := s.preferredUserHash
+	s.preferredUserMu.Unlock()
+	if preferred == "" {
+		return snapshot.entries
+	}
+	entry, ok := snapshot.byHash[preferred]
+	if !ok {
+		return snapshot.entries
+	}
+	entries := make([]userConfig, 0, len(snapshot.entries))
+	entries = append(entries, entry)
+	for _, candidate := range snapshot.entries {
+		if transport.KIPUserHashHexFromKey(candidate.user.Uuid) == preferred {
+			continue
+		}
+		entries = append(entries, candidate)
+	}
+	return entries
+}
+
+func (s *serverInstance) rememberUserHash(hash string) {
+	if s == nil || hash == "" {
+		return
+	}
+	s.preferredUserMu.Lock()
+	s.preferredUserHash = hash
+	s.preferredUserMu.Unlock()
+}
+
 // handshake tries the UUID-specific keys against one replayable byte stream. The Sudoku
 // client hides the UUID hash inside the encrypted KIP hello, so this is required for raw TCP.
 func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transport.HandshakeMeta, error) {
@@ -458,7 +543,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 	if snapshot == nil {
 		return userConfig{}, nil, nil, errors.New("no users")
 	}
-	entries := snapshot.entries
+	entries := s.handshakeEntries(snapshot)
 	if len(entries) == 0 && len(snapshot.byHash) > 0 {
 		// Keep compatibility with snapshots assembled by older callers/tests.
 		entries = make([]userConfig, 0, len(snapshot.byHash))
@@ -520,6 +605,8 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 					return userConfig{}, nil, nil, err
 				}
 				replay.Commit()
+				s.unblockHandshakeSource(remoteSourceAddress(raw))
+				s.rememberUserHash(hash)
 				return entry, conn, meta, nil
 			}
 			if transport.HTTPMaskRejected(wrapped) {
@@ -539,6 +626,8 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 				if err == nil && meta != nil && meta.UserHash == transport.KIPUserHashHexFromKey(entry.user.Uuid) {
 					passThroughReplay.Commit()
 					replay.Commit()
+					s.unblockHandshakeSource(remoteSourceAddress(raw))
+					s.rememberUserHash(meta.UserHash)
 					return entry, conn, meta, nil
 				}
 				if err != nil {
@@ -600,6 +689,8 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 				continue
 			}
 			replay.Commit()
+			s.unblockHandshakeSource(remoteSourceAddress(raw))
+			s.rememberUserHash(meta.UserHash)
 			return entry, conn, meta, nil
 		}
 		lastErr = err

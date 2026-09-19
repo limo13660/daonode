@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/limo13660/daonode/core/sudoku/transport/obfs/httpmask"
 )
@@ -79,11 +80,13 @@ func newHTTPMaskMultiUserTunnelServer(configs []*ProtocolConfig, passThroughOnRe
 		return &HTTPMaskTunnelServer{}
 	}
 	byUserHash := make(map[string]*ProtocolConfig, len(configs))
+	orderedConfigs := make([]*ProtocolConfig, 0, len(configs))
 	for _, cfg := range configs {
 		if cfg == nil || cfg.DisableHTTPMask || strings.EqualFold(strings.TrimSpace(cfg.HTTPMaskMode), "") || strings.EqualFold(strings.TrimSpace(cfg.HTTPMaskMode), "legacy") {
 			continue
 		}
 		byUserHash[KIPUserHashHexFromKey(cfg.Key)] = cfg
+		orderedConfigs = append(orderedConfigs, cfg)
 	}
 	if len(byUserHash) == 0 {
 		return &HTTPMaskTunnelServer{cfg: base}
@@ -92,15 +95,37 @@ func newHTTPMaskMultiUserTunnelServer(configs []*ProtocolConfig, passThroughOnRe
 	// Stream/poll do not need a second HTTP auth layer. WebSocket clients send
 	// the per-key auth token, but the Sudoku early payload is the authoritative
 	// credential when several UUIDs share one listener, so leave AuthKey empty.
+	var preferredMu sync.Mutex
+	preferredHash := ""
 	early := &httpmask.TunnelServerEarlyHandshake{Prepare: func(payload []byte) (*httpmask.PreparedServerEarlyHandshake, error) {
 		var firstErr error
-		for _, cfg := range byUserHash {
+		preferredMu.Lock()
+		preferred := preferredHash
+		preferredMu.Unlock()
+		candidates := orderedConfigs
+		if preferred != "" {
+			if preferredCfg := byUserHash[preferred]; preferredCfg != nil {
+				candidates = make([]*ProtocolConfig, 0, len(orderedConfigs))
+				candidates = append(candidates, preferredCfg)
+				for _, cfg := range orderedConfigs {
+					if cfg != preferredCfg {
+						candidates = append(candidates, cfg)
+					}
+				}
+			}
+		}
+		for _, cfg := range candidates {
 			prepared, err := NewHTTPMaskServerEarlyHandshake(
 				newHTTPMaskEarlyCodecConfig(cfg, ServerAEADSeed(cfg.Key)),
 				cfg.tableCandidates(),
 				globalHandshakeReplay.allow,
 			).Prepare(payload)
 			if err == nil {
+				if prepared != nil && prepared.UserHash != "" {
+					preferredMu.Lock()
+					preferredHash = prepared.UserHash
+					preferredMu.Unlock()
+				}
 				return prepared, nil
 			}
 			cfg.ReleaseTableCandidates()

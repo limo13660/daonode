@@ -75,30 +75,13 @@ func NewServerTablesWithCustomPatterns(key string, tableType string, customTable
 		return nil, err
 	}
 
-	// Shadowrocket's sudoku:// URI does not carry the ASCII/table preference.
-	// When the panel has no custom table, accept the official directional
-	// default as probe candidates. Keep this compatibility set bounded: every
-	// candidate carries a full DecodeMap and multiplying them for every panel
-	// UUID can exhaust a small node during a failed handshake.
-	if strings.TrimSpace(customTable) == "" && len(customTables) == 0 {
-		// URI clients do not carry table_type. Accept the two symmetric modes
-		// and the official directional default while a panel without an explicit
-		// custom table is being migrated. Explicit panel table/custom settings
-		// remain strict and do not multiply the candidate set.
-		fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy"}
-		seenTypes := map[string]struct{}{strings.ToLower(strings.TrimSpace(tableType)): {}}
-		for _, fallbackType := range fallbackTypes {
-			if _, exists := seenTypes[fallbackType]; exists {
-				continue
-			}
-			seenTypes[fallbackType] = struct{}{}
-			fallback, fallbackErr := NewTableWithCustom(key, fallbackType, "")
-			if fallbackErr != nil {
-				return nil, fallbackErr
-			}
-			tables = append(tables, fallback)
-		}
-	}
+	// Do not silently expand an unconfigured server into several table modes.
+	// A table contains a large DecodeMap; doing this for every UUID during a
+	// multi-user probe multiplies the allocation by the number of panel users
+	// and can exhaust a small node. Official Sudoku clients carry their table
+	// preference in the configuration/URI (and default to prefer_entropy), so
+	// the panel's selected mode is the only implicit candidate. Explicit
+	// custom_tables remain supported above and are intentionally probeable.
 	return tables, nil
 }
 
