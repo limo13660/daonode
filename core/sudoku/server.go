@@ -43,10 +43,12 @@ const (
 	eagerSudokuTableUserLimit = 8
 	// Keep the expensive unauthenticated path small on low-memory nodes. A
 	// single Shadowrocket client can open several probes and reconnects at once.
-	maxConcurrentSudokuHandshakes = 8
-	// HTTPMask stream/poll may legitimately use several underlying sockets
-	// for one logical connection, so keep this equal to the global budget.
-	maxConcurrentSudokuHandshakesPerSource = 8
+	maxConcurrentSudokuHandshakes = 4
+	// Shadowrocket opens several speculative sockets while importing a node.
+	// Legacy HTTPMask handshakes cannot carry the UUID hash up front and may
+	// probe every configured user, so allowing eight probes from one source
+	// multiplies the expensive table/AEAD work and can starve the host.
+	maxConcurrentSudokuHandshakesPerSource = 2
 )
 
 type serverInstance struct {
@@ -65,6 +67,8 @@ type serverInstance struct {
 	handshakeSlots     chan struct{}
 	handshakeMu        sync.Mutex
 	handshakesBySource map[string]int
+	handshakeLogMu     sync.Mutex
+	handshakeLogAt     map[string]time.Time
 }
 
 func buildUserConfigs(info *panel.NodeInfo, users map[int]panel.UserInfo) (*userConfigSnapshot, error) {
@@ -82,10 +86,10 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 	}
 	tableType := strings.TrimSpace(ps.TableType)
 	if tableType == "" {
-		// The official easy-install server defaults to ASCII on the uplink and
-		// entropy on the downlink. Shadowrocket's sudoku:// importer follows
-		// this directional default because the URI has no table-type field.
-		tableType = "up_ascii_down_entropy"
+		// DaoBoard and the official Mihomo client default to the symmetric
+		// entropy layout. Directional layouts remain available when the panel
+		// explicitly selects one.
+		tableType = "prefer_entropy"
 	}
 	normalizedTableType, err := transport.NormalizeTableType(tableType)
 	if err != nil {
@@ -285,7 +289,7 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 		return nil, fmt.Errorf("listen for Sudoku server: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int)}
+	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int), handshakeLogAt: make(map[string]time.Time)}
 	s.users.Store(users)
 	go s.serve()
 	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash), "lazy_tables": len(users.byHash) > eagerSudokuTableUserLimit}).Info("Sudoku runtime started")
@@ -333,6 +337,9 @@ func (s *serverInstance) handle(raw net.Conn) {
 	}()
 	entry, conn, meta, err := s.handshake(raw)
 	if err != nil {
+		if !errors.Is(err, errHTTPMaskHandled) {
+			s.logHandshakeFailure(source, err)
+		}
 		return
 	}
 	// Established proxy sessions must not consume the unauthenticated
@@ -359,6 +366,32 @@ func (s *serverInstance) handle(raw net.Conn) {
 	case transport.SessionTypeMultiplex:
 		s.handleMux(conn, entry.user, session)
 	}
+}
+
+// logHandshakeFailure keeps the failure reason visible without allowing a
+// malformed or incompatible client to flood the daemon log while it retries.
+func (s *serverInstance) logHandshakeFailure(source string, err error) {
+	if s == nil || err == nil {
+		return
+	}
+	key := source
+	if key == "" {
+		key = "unknown"
+	}
+	now := time.Now()
+	s.handshakeLogMu.Lock()
+	last := s.handshakeLogAt[key]
+	if !last.IsZero() && now.Sub(last) < 5*time.Second {
+		s.handshakeLogMu.Unlock()
+		return
+	}
+	s.handshakeLogAt[key] = now
+	s.handshakeLogMu.Unlock()
+	users := 0
+	if snapshot := s.users.Load(); snapshot != nil {
+		users = len(snapshot.entries)
+	}
+	log.WithFields(log.Fields{"protocol": "sudoku", "source": source, "users": users}).WithError(err).Warn("Sudoku handshake failed")
 }
 
 func (s *serverInstance) acquireHandshakeSlot(source string) bool {
@@ -445,6 +478,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 	}
 	deadline := time.Now().Add(handshakeBudget)
 	replay := newReplayConn(raw)
+	var lastErr error
 	// A tunneled HTTPMask connection may already contain the encrypted KIP
 	// hello. The shared tunnel decrypts it once and tags the returned stream
 	// with the UUID hash. Route directly to that user; retrying the same stream
@@ -482,6 +516,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 					if err == nil {
 						err = errors.New("Sudoku HTTPMask user hash mismatch")
 					}
+					lastErr = err
 					return userConfig{}, nil, nil, err
 				}
 				replay.Commit()
@@ -506,12 +541,18 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 					replay.Commit()
 					return entry, conn, meta, nil
 				}
+				if err != nil {
+					lastErr = err
+				}
 				cfg.ReleaseTableCandidates()
 				if conn != nil {
 					_ = conn.Close()
 				}
 			}
-			return userConfig{}, nil, nil, errors.New("Sudoku handshake rejected")
+			if lastErr == nil {
+				lastErr = errors.New("Sudoku handshake rejected")
+			}
+			return userConfig{}, nil, nil, fmt.Errorf("Sudoku handshake rejected: %w", lastErr)
 		}
 	}
 	for _, entry := range entries {
@@ -553,6 +594,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 		if err == nil {
 			if meta == nil || meta.UserHash != transport.KIPUserHashHexFromKey(entry.user.Uuid) {
 				_ = conn.Close()
+				lastErr = errors.New("Sudoku user hash mismatch")
 				cfg.ReleaseTableCandidates()
 				replay.Reset()
 				continue
@@ -560,10 +602,14 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 			replay.Commit()
 			return entry, conn, meta, nil
 		}
+		lastErr = err
 		cfg.ReleaseTableCandidates()
 		replay.Reset()
 	}
-	return userConfig{}, nil, nil, errors.New("Sudoku handshake rejected")
+	if lastErr == nil {
+		lastErr = errors.New("Sudoku handshake rejected")
+	}
+	return userConfig{}, nil, nil, fmt.Errorf("Sudoku handshake rejected: %w", lastErr)
 }
 
 func maxInt(a, b int) int {

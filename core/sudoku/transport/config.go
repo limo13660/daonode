@@ -63,19 +63,13 @@ func (p *TableProvider) Tables() ([]*sudoku.Table, error) {
 	}
 }
 
-// Release drops a successfully built table set after a failed handshake.
-// This prevents probing a large UUID list from retaining one full DecodeMap
-// for every non-matching key. A successful connection leaves its provider
-// cached for subsequent sessions.
+// Release is retained for API compatibility. Table candidates are immutable
+// for the lifetime of a snapshot, so failed handshakes must not drop them:
+// dropping here makes every client retry rebuild the expensive DecodeMap and
+// can turn one incompatible client into a CPU/memory exhaustion loop.
 func (p *TableProvider) Release() {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	if !p.busy && p.err == nil {
-		p.table = nil
-	}
-	p.mu.Unlock()
+	// Intentionally no-op. The owning runtime releases the whole snapshot on
+	// configuration replacement; individual handshake attempts do not own it.
 }
 
 // ProtocolConfig defines the configuration for the Sudoku protocol stack.

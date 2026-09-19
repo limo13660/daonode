@@ -30,3 +30,21 @@ func TestTableProviderBuildsOnceConcurrently(t *testing.T) {
 		t.Fatalf("provider called %d times, want 1", calls)
 	}
 }
+
+func TestTableProviderKeepsTablesAfterRelease(t *testing.T) {
+	var calls int
+	provider := NewTableProvider(func() ([]*obfssudoku.Table, error) {
+		calls++
+		return []*obfssudoku.Table{{}}, nil
+	})
+	if _, err := provider.Tables(); err != nil {
+		t.Fatalf("first build: %v", err)
+	}
+	provider.Release()
+	if _, err := provider.Tables(); err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("table provider rebuilt after failed-attempt release: %d builds", calls)
+	}
+}

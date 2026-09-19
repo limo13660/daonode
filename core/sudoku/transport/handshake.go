@@ -387,7 +387,7 @@ func readFirstSessionMessage(conn net.Conn) (*KIPMessage, error) {
 }
 
 func maybeConsumeLegacyHTTPMask(rawConn net.Conn, r *bufio.Reader, cfg *ProtocolConfig) ([]byte, *SuspiciousError) {
-	if rawConn == nil || r == nil || cfg == nil || cfg.DisableHTTPMask || !acceptsLegacyHTTPMaskFallback(cfg.HTTPMaskMode) {
+	if rawConn == nil || r == nil || cfg == nil || !acceptsLegacyHTTPMaskFallback(cfg.HTTPMaskMode) {
 		return nil, nil
 	}
 

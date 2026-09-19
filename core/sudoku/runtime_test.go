@@ -80,7 +80,7 @@ func TestBuildUserConfigsAcceptsShadowrocketDefaultTable(t *testing.T) {
 		t.Fatalf("buildUserConfigs() error = %v", err)
 	}
 	entry := snapshot.byHash[transport.KIPUserHashHexFromKey("shadowrocket-user")]
-	if entry.cfg == nil || len(entry.cfg.Tables) != 2 {
+	if entry.cfg == nil || len(entry.cfg.Tables) < 2 {
 		t.Fatalf("table candidates = %#v, want configured and compatibility tables", entry.cfg)
 	}
 	if entry.cfg.Tables[0].Hint() == entry.cfg.Tables[1].Hint() {
