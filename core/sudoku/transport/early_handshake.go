@@ -22,6 +22,10 @@ type EarlyCodecConfig struct {
 	EnablePureDownlink bool
 	PaddingMin         int
 	PaddingMax         int
+	// ProbeLimiter bounds concurrent key/table probes on a multi-user
+	// listener. It is deliberately optional so standalone clients/tests keep
+	// the upstream behavior.
+	ProbeLimiter chan struct{}
 }
 
 type EarlyClientState struct {
@@ -222,7 +226,13 @@ func ProcessEarlyClientPayload(cfg EarlyCodecConfig, tables []*sudokuobfs.Table,
 
 	var firstErr error
 	for _, table := range tables {
+		if cfg.ProbeLimiter != nil {
+			cfg.ProbeLimiter <- struct{}{}
+		}
 		state, err := processEarlyClientPayloadForTable(cfg, tables, table, payload, allowReplay)
+		if cfg.ProbeLimiter != nil {
+			<-cfg.ProbeLimiter
+		}
 		if err == nil {
 			return state, nil
 		}

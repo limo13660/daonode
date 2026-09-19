@@ -97,6 +97,7 @@ func (r *runtime) SyncUsers(deleted, added []panel.UserInfo) error {
 			return err
 		}
 	} else {
+		r.instance.installHandshakeProbeLimiter(configs)
 		r.instance.users.Store(configs)
 		closeReplacedHTTPMaskTunnels(previousConfigs, configs)
 	}

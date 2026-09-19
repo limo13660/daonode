@@ -35,6 +35,7 @@ func newHTTPMaskEarlyCodecConfig(cfg *ProtocolConfig, psk string) EarlyCodecConf
 		EnablePureDownlink: cfg.EnablePureDownlink,
 		PaddingMin:         cfg.PaddingMin,
 		PaddingMax:         cfg.PaddingMax,
+		ProbeLimiter:       cfg.HandshakeProbeLimiter,
 	}
 }
 

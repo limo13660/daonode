@@ -41,8 +41,9 @@ const (
 	// eager configuration behavior (and make validation failures visible during
 	// sync), while large panel user lists use the lazy provider below.
 	eagerSudokuTableUserLimit = 8
-	// Keep the expensive unauthenticated path small on low-memory nodes. A
-	// single Shadowrocket client can open several probes and reconnects at once.
+	// HTTPMask uses several TCP sockets for one logical connection, so retain
+	// enough handshake slots for its control/data paths. The CPU-heavy table
+	// probes are serialized separately by handshakeProbeSlots below.
 	maxConcurrentSudokuHandshakes = 4
 	// HTTPMask stream/poll uses several TCP sockets for one logical connection
 	// (authorize, long-poll and upload). Keep enough per-source capacity for
@@ -52,30 +53,31 @@ const (
 	// A bad table/key or non-Sudoku probe can otherwise reconnect in a tight
 	// loop and repeat the full multi-user search forever. A short source
 	// cooldown bounds that failure mode without delaying an established client.
-	sudokuHandshakeFailureCooldown = 2 * time.Second
+	sudokuHandshakeFailureCooldown = 5 * time.Second
 )
 
 type serverInstance struct {
-	services           *shared.RuntimeServices
-	router             *routePolicy
-	users              atomic.Pointer[userConfigSnapshot]
-	listener           net.Listener
-	ctx                context.Context
-	cancel             context.CancelFunc
-	done               chan error
-	close              sync.Once
-	closeErr           error
-	connMu             sync.Mutex
-	conns              map[net.Conn]struct{}
-	handlers           sync.WaitGroup
-	handshakeSlots     chan struct{}
-	handshakeMu        sync.Mutex
-	handshakesBySource map[string]int
-	handshakeBlocked   map[string]time.Time
-	preferredUserMu    sync.Mutex
-	preferredUserHash  string
-	handshakeLogMu     sync.Mutex
-	handshakeLogAt     map[string]time.Time
+	services            *shared.RuntimeServices
+	router              *routePolicy
+	users               atomic.Pointer[userConfigSnapshot]
+	listener            net.Listener
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	done                chan error
+	close               sync.Once
+	closeErr            error
+	connMu              sync.Mutex
+	conns               map[net.Conn]struct{}
+	handlers            sync.WaitGroup
+	handshakeSlots      chan struct{}
+	handshakeProbeSlots chan struct{}
+	handshakeMu         sync.Mutex
+	handshakesBySource  map[string]int
+	handshakeBlocked    map[string]time.Time
+	preferredUserMu     sync.Mutex
+	preferredUserHash   string
+	handshakeLogMu      sync.Mutex
+	handshakeLogAt      map[string]time.Time
 }
 
 func buildUserConfigs(info *panel.NodeInfo, users map[int]panel.UserInfo) (*userConfigSnapshot, error) {
@@ -352,11 +354,27 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 		return nil, fmt.Errorf("listen for Sudoku server: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakesBySource: make(map[string]int), handshakeBlocked: make(map[string]time.Time), handshakeLogAt: make(map[string]time.Time)}
+	s := &serverInstance{services: services, router: router, listener: listener, ctx: ctx, cancel: cancel, done: make(chan error, 1), conns: make(map[net.Conn]struct{}), handshakeSlots: make(chan struct{}, maxConcurrentSudokuHandshakes), handshakeProbeSlots: make(chan struct{}, 1), handshakesBySource: make(map[string]int), handshakeBlocked: make(map[string]time.Time), handshakeLogAt: make(map[string]time.Time)}
+	s.installHandshakeProbeLimiter(users)
 	s.users.Store(users)
 	go s.serve()
 	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash), "lazy_tables": len(users.byHash) > eagerSudokuTableUserLimit}).Info("Sudoku runtime started")
 	return s, nil
+}
+
+// installHandshakeProbeLimiter attaches the per-listener CPU limiter to the
+// immutable-looking user snapshot. Snapshots are replaced under runtime.mu;
+// assigning this listener-owned channel before publishing a new snapshot is
+// safe and lets HTTPMask's early handshake use the same limiter as raw TCP.
+func (s *serverInstance) installHandshakeProbeLimiter(snapshot *userConfigSnapshot) {
+	if s == nil || snapshot == nil {
+		return
+	}
+	for i := range snapshot.entries {
+		if snapshot.entries[i].cfg != nil {
+			snapshot.entries[i].cfg.HandshakeProbeLimiter = s.handshakeProbeSlots
+		}
+	}
 }
 
 func (s *serverInstance) serve() {
@@ -398,10 +416,11 @@ func (s *serverInstance) handle(raw net.Conn) {
 			s.releaseHandshakeSlot(source)
 		}
 	}()
+	handshakeStarted := time.Now()
 	entry, conn, meta, err := s.handshake(raw)
 	if err != nil {
 		if !errors.Is(err, errHTTPMaskHandled) {
-			s.logHandshakeFailure(source, err)
+			s.logHandshakeFailure(source, err, time.Since(handshakeStarted))
 		}
 		return
 	}
@@ -433,7 +452,7 @@ func (s *serverInstance) handle(raw net.Conn) {
 
 // logHandshakeFailure keeps the failure reason visible without allowing a
 // malformed or incompatible client to flood the daemon log while it retries.
-func (s *serverInstance) logHandshakeFailure(source string, err error) {
+func (s *serverInstance) logHandshakeFailure(source string, err error, elapsed time.Duration) {
 	if s == nil || err == nil {
 		return
 	}
@@ -455,7 +474,7 @@ func (s *serverInstance) logHandshakeFailure(source string, err error) {
 	if snapshot := s.users.Load(); snapshot != nil {
 		users = len(snapshot.entries)
 	}
-	log.WithFields(log.Fields{"protocol": "sudoku", "source": source, "users": users}).WithError(err).Warn("Sudoku handshake failed")
+	log.WithFields(log.Fields{"protocol": "sudoku", "source": source, "users": users, "elapsed": elapsed.String()}).WithError(err).Warn("Sudoku handshake failed")
 }
 
 func (s *serverInstance) acquireHandshakeSlot(source string) bool {
@@ -607,6 +626,10 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 			entries = append(entries, e)
 		}
 	}
+	// Keep the upstream raw-TCP compatibility window. The expensive probe is
+	// serialized by handshakeProbeSlots, so extending this deadline no longer
+	// multiplies CPU use while it still gives a large user list time to reach a
+	// Shadowrocket fallback table.
 	handshakeBudget := 5 * time.Second
 	fallbackEntries := make([]userConfig, 0)
 	for _, entry := range entries {

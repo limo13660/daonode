@@ -1,6 +1,7 @@
 package sudoku
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -123,6 +124,11 @@ type ProtocolConfig struct {
 
 	// Server-side handshake timeout (seconds).
 	HandshakeTimeoutSeconds int
+
+	// HandshakeProbeLimiter optionally serializes the CPU-heavy table/AEAD
+	// probe while allowing HTTPMask's multiple control connections to remain
+	// concurrent. It is set by the server runtime and left nil for clients.
+	HandshakeProbeLimiter chan struct{}
 
 	// DisableHTTPMask disables all HTTP camouflage layers.
 	DisableHTTPMask bool
@@ -361,5 +367,17 @@ func (c *ProtocolConfig) ReleaseTableCandidates() {
 	}
 	if c.TableFallbackProvider != nil {
 		c.TableFallbackProvider.Release()
+	}
+}
+
+func (c *ProtocolConfig) acquireProbeSlot(ctx context.Context) func() {
+	if c == nil || c.HandshakeProbeLimiter == nil {
+		return func() {}
+	}
+	select {
+	case c.HandshakeProbeLimiter <- struct{}{}:
+		return func() { <-c.HandshakeProbeLimiter }
+	case <-ctx.Done():
+		return func() {}
 	}
 }

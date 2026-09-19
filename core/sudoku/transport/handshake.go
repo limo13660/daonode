@@ -3,6 +3,7 @@ package sudoku
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/hex"
@@ -437,6 +438,13 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 	if susp != nil {
 		return nil, nil, susp
 	}
+	// Do not hold the CPU limiter while waiting for a client's first bytes or
+	// parsing the optional legacy HTTP header; only the table/AEAD probe needs
+	// serialization.
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), handshakeTimeout)
+	defer cancelProbe()
+	releaseProbe := cfg.acquireProbeSlot(probeCtx)
+	defer releaseProbe()
 
 	selectedTable, preRead, err := selectTableByProbe(bufReader, cfg, cfg.tableCandidates())
 	if err != nil {
