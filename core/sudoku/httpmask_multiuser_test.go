@@ -164,6 +164,41 @@ func TestEstablishedSessionsReleaseHandshakeSlots(t *testing.T) {
 	}
 }
 
+func TestLargeUserListSupportsShadowrocketFallbackTable(t *testing.T) {
+	users := make(map[int]panel.UserInfo, eagerSudokuTableUserLimit+1)
+	for id := 1; id <= eagerSudokuTableUserLimit+1; id++ {
+		users[id] = panel.UserInfo{Id: id, Uuid: fmt.Sprintf("fallback-sudoku-user-%d", id)}
+	}
+	server := startMultiUserSudokuServer(t, "raw", users)
+	target := startSudokuTestEchoServer(t)
+	key := users[len(users)].Uuid
+	tables, err := transport.NewClientTablesWithCustomPatterns(transport.ClientAEADSeed(key), "prefer_ascii", "", nil)
+	if err != nil {
+		t.Fatalf("build client tables: %v", err)
+	}
+	raw, err := (&net.Dialer{}).Dial("tcp", server)
+	if err != nil {
+		t.Fatalf("dial Sudoku: %v", err)
+	}
+	conn, err := transport.ClientHandshake(raw, &transport.ProtocolConfig{
+		ServerAddress:           server,
+		Key:                     key,
+		AEADMethod:              "chacha20-poly1305",
+		Tables:                  tables,
+		PaddingMin:              0,
+		PaddingMax:              0,
+		EnablePureDownlink:      true,
+		DisableHTTPMask:         true,
+		HandshakeTimeoutSeconds: 10,
+	})
+	if err != nil {
+		raw.Close()
+		t.Fatalf("fallback Sudoku handshake: %v", err)
+	}
+	assertSudokuTCPEcho(t, conn, target, "large-user-fallback")
+	_ = conn.Close()
+}
+
 func startMultiUserHTTPMaskServer(t *testing.T, mode string, users map[int]panel.UserInfo) string {
 	t.Helper()
 	return startMultiUserSudokuServer(t, mode, users)

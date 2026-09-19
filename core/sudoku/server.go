@@ -148,7 +148,7 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 		patterns := append([]string(nil), ps.CustomTables...)
 		customTable := ps.CustomTable
 		userInfo := user
-		cfg.TableProvider = transport.NewTableProvider(func() ([]*sudokuobfs.Table, error) {
+		buildTables := func() ([]*sudokuobfs.Table, error) {
 			started := time.Now()
 			tables, buildErr := transport.NewServerTablesWithCustomPatterns(transport.ServerAEADSeed(key), tableType, customTable, patterns)
 			fields := log.Fields{"protocol": "sudoku", "user_id": userInfo.Id, "table_type": tableType, "table_count": len(tables), "elapsed": time.Since(started).String()}
@@ -158,14 +158,70 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 				log.WithFields(fields).Info("Sudoku table built lazily")
 			}
 			return tables, buildErr
-		})
+		}
+		// For large user lists, defer Shadowrocket compatibility tables until
+		// the panel-selected table has failed. This keeps the common first
+		// connection path at one DecodeMap per UUID instead of three.
+		stagedCompatibility := len(users) > eagerSudokuTableUserLimit && strings.TrimSpace(customTable) == "" && len(patterns) == 0
+		if stagedCompatibility {
+			cfg.TableProvider = transport.NewTableProvider(func() ([]*sudokuobfs.Table, error) {
+				started := time.Now()
+				table, buildErr := sudokuobfs.NewTableWithCustom(transport.ServerAEADSeed(key), tableType, "")
+				fields := log.Fields{"protocol": "sudoku", "user_id": userInfo.Id, "table_type": tableType, "table_count": 1, "elapsed": time.Since(started).String()}
+				if buildErr != nil {
+					log.WithFields(fields).WithError(buildErr).Warn("Sudoku table build failed")
+				} else {
+					log.WithFields(fields).Info("Sudoku table built lazily")
+				}
+				if buildErr != nil {
+					return nil, buildErr
+				}
+				return []*sudokuobfs.Table{table}, nil
+			})
+			cfg.TableFallbackProvider = transport.NewTableProvider(func() ([]*sudokuobfs.Table, error) {
+				fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy"}
+				seen := map[string]struct{}{strings.ToLower(tableType): {}}
+				tables := make([]*sudokuobfs.Table, 0, len(fallbackTypes))
+				for _, fallbackType := range fallbackTypes {
+					if _, exists := seen[fallbackType]; exists {
+						continue
+					}
+					seen[fallbackType] = struct{}{}
+					table, buildErr := sudokuobfs.NewTableWithCustom(transport.ServerAEADSeed(key), fallbackType, "")
+					if buildErr != nil {
+						return nil, buildErr
+					}
+					tables = append(tables, table)
+				}
+				log.WithFields(log.Fields{"protocol": "sudoku", "user_id": userInfo.Id, "table_type": tableType, "table_count": len(tables)}).Info("Sudoku fallback tables built lazily")
+				return tables, nil
+			})
+		} else {
+			cfg.TableProvider = transport.NewTableProvider(buildTables)
+		}
 		if len(users) <= eagerSudokuTableUserLimit {
-			tables, buildErr := cfg.TableProvider.Tables()
-			if buildErr != nil {
-				return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, buildErr)
+			// Small deployments keep the complete candidate set in the config
+			// so validation and compatibility behavior remain unchanged.
+			if cfg.TableFallbackProvider != nil {
+				fallback, fallbackErr := cfg.TableFallbackProvider.Tables()
+				if fallbackErr != nil {
+					return nil, fmt.Errorf("build Sudoku fallback table for user %d: %w", user.Id, fallbackErr)
+				}
+				primary, primaryErr := cfg.TableProvider.Tables()
+				if primaryErr != nil {
+					return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, primaryErr)
+				}
+				cfg.Tables = append(primary, fallback...)
+				cfg.TableProvider = nil
+				cfg.TableFallbackProvider = nil
+			} else {
+				tables, buildErr := cfg.TableProvider.Tables()
+				if buildErr != nil {
+					return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, buildErr)
+				}
+				cfg.Tables = tables
+				cfg.TableProvider = nil
 			}
-			cfg.Tables = tables
-			cfg.TableProvider = nil
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate Sudoku user %d: %w", user.Id, err)
@@ -552,6 +608,7 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 		}
 	}
 	handshakeBudget := 5 * time.Second
+	fallbackEntries := make([]userConfig, 0)
 	for _, entry := range entries {
 		if entry.tunnel != nil {
 			// HTTPMask stream/poll authorization can legitimately need a few
@@ -623,6 +680,16 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 				cfg := *entry.cfg
 				cfg.HandshakeTimeoutSeconds = maxInt(1, int((time.Until(deadline)+time.Second-1)/time.Second))
 				conn, meta, err := transport.ServerHandshake(passThroughReplay, &cfg)
+				if err != nil && cfg.TableFallbackProvider != nil {
+					if cfg.TableProvider != nil {
+						cfg.TableProvider.Release()
+					}
+					passThroughReplay.Reset()
+					fallbackCfg := cfg
+					fallbackCfg.TableProvider = cfg.TableFallbackProvider
+					fallbackCfg.TableFallbackProvider = nil
+					conn, meta, err = transport.ServerHandshake(passThroughReplay, &fallbackCfg)
+				}
 				if err == nil && meta != nil && meta.UserHash == transport.KIPUserHashHexFromKey(entry.user.Uuid) {
 					passThroughReplay.Commit()
 					replay.Commit()
@@ -694,6 +761,39 @@ func (s *serverInstance) handshake(raw net.Conn) (userConfig, net.Conn, *transpo
 			return entry, conn, meta, nil
 		}
 		lastErr = err
+		if cfg.TableFallbackProvider != nil {
+			// Defer compatibility candidates until every primary candidate has
+			// been checked. Building them for each wrong UUID defeats staged
+			// probing and makes the common first connection expensive again.
+			cfg.TableProvider.Release()
+			fallbackEntries = append(fallbackEntries, entry)
+		} else {
+			cfg.ReleaseTableCandidates()
+		}
+		replay.Reset()
+	}
+	for _, entry := range fallbackEntries {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		cfg := *entry.cfg
+		cfg.TableProvider = cfg.TableFallbackProvider
+		cfg.TableFallbackProvider = nil
+		cfg.HandshakeTimeoutSeconds = maxInt(1, int((remaining+time.Second-1)/time.Second))
+		conn, meta, err := transport.ServerHandshake(replay, &cfg)
+		if err == nil && meta != nil && meta.UserHash == transport.KIPUserHashHexFromKey(entry.user.Uuid) {
+			replay.Commit()
+			s.unblockHandshakeSource(remoteSourceAddress(raw))
+			s.rememberUserHash(meta.UserHash)
+			return entry, conn, meta, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
 		cfg.ReleaseTableCandidates()
 		replay.Reset()
 	}

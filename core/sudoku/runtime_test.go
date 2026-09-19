@@ -88,6 +88,38 @@ func TestBuildUserConfigsAcceptsShadowrocketDefaultTable(t *testing.T) {
 	}
 }
 
+func TestBuildUserConfigsStagesShadowrocketFallbackForLargeLists(t *testing.T) {
+	info := sudokuNodeInfo()
+	users := make(map[int]panel.UserInfo, eagerSudokuTableUserLimit+1)
+	for id := 1; id <= eagerSudokuTableUserLimit+1; id++ {
+		users[id] = panel.UserInfo{Id: id, Uuid: fmt.Sprintf("staged-sudoku-user-%d", id)}
+	}
+	snapshot, err := buildUserConfigs(info, users)
+	if err != nil {
+		t.Fatalf("buildUserConfigs() error = %v", err)
+	}
+	entry := snapshot.entries[0]
+	if entry.cfg.TableProvider == nil || entry.cfg.TableFallbackProvider == nil {
+		t.Fatalf("large user list did not create staged table providers: %#v", entry.cfg)
+	}
+	primary, err := entry.cfg.TableProvider.Tables()
+	if err != nil {
+		t.Fatalf("build primary table: %v", err)
+	}
+	if len(primary) != 1 {
+		t.Fatalf("primary tables = %d, want 1", len(primary))
+	}
+	entry.cfg.TableProvider.Release()
+	fallback, err := entry.cfg.TableFallbackProvider.Tables()
+	if err != nil {
+		t.Fatalf("build fallback tables: %v", err)
+	}
+	if len(fallback) != 2 {
+		t.Fatalf("fallback tables = %d, want 2", len(fallback))
+	}
+	entry.cfg.TableFallbackProvider.Release()
+}
+
 func TestCompileSudokuRoutesSupportsGeoIPPrivate(t *testing.T) {
 	policy, err := compileRoutePolicy([]panel.Route{
 		{Id: 4, Action: "block_ip", Match: []string{"geoip:private"}},

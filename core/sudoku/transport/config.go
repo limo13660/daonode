@@ -105,6 +105,11 @@ type ProtocolConfig struct {
 	// used by the server; clients may continue to populate Tables directly.
 	TableProvider *TableProvider
 
+	// TableFallbackProvider contains compatibility candidates that are built
+	// only after the primary table set fails. Servers use this for native
+	// sudoku:// clients whose URI does not carry a table mode.
+	TableFallbackProvider *TableProvider
+
 	// Padding insertion ratio (0-100). Must satisfy PaddingMax >= PaddingMin.
 	PaddingMin int
 	PaddingMax int
@@ -348,7 +353,13 @@ func (c *ProtocolConfig) resolveTableCandidates() ([]*sudoku.Table, error) {
 }
 
 func (c *ProtocolConfig) ReleaseTableCandidates() {
-	if c != nil && len(c.Tables) == 0 && c.Table == nil && c.TableProvider != nil {
+	if c == nil || len(c.Tables) != 0 || c.Table != nil {
+		return
+	}
+	if c.TableProvider != nil {
 		c.TableProvider.Release()
+	}
+	if c.TableFallbackProvider != nil {
+		c.TableFallbackProvider.Release()
 	}
 }

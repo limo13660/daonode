@@ -114,6 +114,7 @@ func newHTTPMaskMultiUserTunnelServer(configs []*ProtocolConfig, passThroughOnRe
 				}
 			}
 		}
+		failed := make([]*ProtocolConfig, 0)
 		for _, cfg := range candidates {
 			prepared, err := NewHTTPMaskServerEarlyHandshake(
 				newHTTPMaskEarlyCodecConfig(cfg, ServerAEADSeed(cfg.Key)),
@@ -128,7 +129,42 @@ func newHTTPMaskMultiUserTunnelServer(configs []*ProtocolConfig, passThroughOnRe
 				}
 				return prepared, nil
 			}
-			cfg.ReleaseTableCandidates()
+			if cfg.TableFallbackProvider != nil {
+				if cfg.TableProvider != nil {
+					cfg.TableProvider.Release()
+				}
+				failed = append(failed, cfg)
+			} else {
+				cfg.ReleaseTableCandidates()
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		// Only build fallback layouts after all primary layouts have failed;
+		// otherwise every wrong UUID would pay the compatibility-table cost.
+		for _, cfg := range failed {
+			fallback, err := cfg.TableFallbackProvider.Tables()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			prepared, err := NewHTTPMaskServerEarlyHandshake(
+				newHTTPMaskEarlyCodecConfig(cfg, ServerAEADSeed(cfg.Key)),
+				fallback,
+				globalHandshakeReplay.allow,
+			).Prepare(payload)
+			if err == nil {
+				if prepared != nil && prepared.UserHash != "" {
+					preferredMu.Lock()
+					preferredHash = prepared.UserHash
+					preferredMu.Unlock()
+				}
+				return prepared, nil
+			}
+			cfg.TableFallbackProvider.Release()
 			if firstErr == nil {
 				firstErr = err
 			}
