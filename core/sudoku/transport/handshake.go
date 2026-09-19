@@ -443,7 +443,10 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 	// serialization.
 	probeCtx, cancelProbe := context.WithTimeout(context.Background(), handshakeTimeout)
 	defer cancelProbe()
-	releaseProbe := cfg.acquireProbeSlot(probeCtx)
+	releaseProbe, acquiredProbe := cfg.acquireProbeSlot(probeCtx)
+	if !acquiredProbe {
+		return nil, nil, fmt.Errorf("Sudoku handshake probe busy: %w", probeCtx.Err())
+	}
 	defer releaseProbe()
 
 	selectedTable, preRead, err := selectTableByProbe(bufReader, cfg, cfg.tableCandidates())

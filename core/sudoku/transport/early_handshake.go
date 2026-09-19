@@ -2,6 +2,7 @@ package sudoku
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/hex"
@@ -26,6 +27,7 @@ type EarlyCodecConfig struct {
 	// listener. It is deliberately optional so standalone clients/tests keep
 	// the upstream behavior.
 	ProbeLimiter chan struct{}
+	ProbeTimeout time.Duration
 }
 
 type EarlyClientState struct {
@@ -224,15 +226,21 @@ func ProcessEarlyClientPayload(cfg EarlyCodecConfig, tables []*sudokuobfs.Table,
 		return nil, fmt.Errorf("no tables configured")
 	}
 
+	probeTimeout := cfg.ProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = 5 * time.Second
+	}
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancelProbe()
+	releaseProbe, acquiredProbe := acquireProbeSlot(probeCtx, cfg.ProbeLimiter)
+	if !acquiredProbe {
+		return nil, fmt.Errorf("early Sudoku handshake probe busy: %w", probeCtx.Err())
+	}
+	defer releaseProbe()
+
 	var firstErr error
 	for _, table := range tables {
-		if cfg.ProbeLimiter != nil {
-			cfg.ProbeLimiter <- struct{}{}
-		}
 		state, err := processEarlyClientPayloadForTable(cfg, tables, table, payload, allowReplay)
-		if cfg.ProbeLimiter != nil {
-			<-cfg.ProbeLimiter
-		}
 		if err == nil {
 			return state, nil
 		}

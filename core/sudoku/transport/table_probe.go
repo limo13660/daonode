@@ -117,15 +117,10 @@ func selectTableByProbe(r *bufio.Reader, cfg *ProtocolConfig, tables []*sudoku.T
 
 	tmp := make([]byte, readChunk)
 	for {
-		if len(candidates) == 1 {
-			tail, err := drainBuffered(r)
-			if err != nil {
-				return nil, nil, fmt.Errorf("drain buffered bytes failed: %w", err)
-			}
-			probe = append(probe, tail...)
-			return candidates[0], probe, nil
-		}
-
+		// Even a single candidate must decrypt the KIP hello before it is
+		// accepted. Returning it immediately lets a wrong UUID consume the
+		// entire handshake timeout and prevents the next user key from being
+		// tried on a large multi-user listener.
 		needMore := false
 		next := candidates[:0]
 		for _, table := range candidates {

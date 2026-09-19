@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/limo13660/daonode/core/sudoku/transport/obfs/httpmask"
 )
@@ -36,6 +37,7 @@ func newHTTPMaskEarlyCodecConfig(cfg *ProtocolConfig, psk string) EarlyCodecConf
 		PaddingMin:         cfg.PaddingMin,
 		PaddingMax:         cfg.PaddingMax,
 		ProbeLimiter:       cfg.HandshakeProbeLimiter,
+		ProbeTimeout:       time.Duration(cfg.HandshakeTimeoutSeconds) * time.Second,
 	}
 }
 

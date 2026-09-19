@@ -199,6 +199,22 @@ func TestLargeUserListSupportsShadowrocketFallbackTable(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestLargeUserListRawPrimaryUserDoesNotWaitPerUUID(t *testing.T) {
+	users := make(map[int]panel.UserInfo, 615)
+	for id := 1; id <= 615; id++ {
+		users[id] = panel.UserInfo{Id: id, Uuid: fmt.Sprintf("primary-sudoku-user-%d", id)}
+	}
+	server := startMultiUserSudokuServer(t, "raw", users)
+	target := startSudokuTestEchoServer(t)
+	started := time.Now()
+	conn := dialMultiUserSudoku(t, server, "raw", users[615].Uuid, 10*time.Second)
+	defer conn.Close()
+	assertSudokuTCPEcho(t, conn, target, "large-user-primary")
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("primary user handshake took %s; likely waited per UUID", elapsed)
+	}
+}
+
 func startMultiUserHTTPMaskServer(t *testing.T, mode string, users map[int]panel.UserInfo) string {
 	t.Helper()
 	return startMultiUserSudokuServer(t, mode, users)

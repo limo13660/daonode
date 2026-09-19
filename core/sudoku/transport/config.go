@@ -370,14 +370,21 @@ func (c *ProtocolConfig) ReleaseTableCandidates() {
 	}
 }
 
-func (c *ProtocolConfig) acquireProbeSlot(ctx context.Context) func() {
-	if c == nil || c.HandshakeProbeLimiter == nil {
-		return func() {}
+func acquireProbeSlot(ctx context.Context, limiter chan struct{}) (func(), bool) {
+	if limiter == nil {
+		return func() {}, true
 	}
 	select {
-	case c.HandshakeProbeLimiter <- struct{}{}:
-		return func() { <-c.HandshakeProbeLimiter }
+	case limiter <- struct{}{}:
+		return func() { <-limiter }, true
 	case <-ctx.Done():
-		return func() {}
+		return func() {}, false
 	}
+}
+
+func (c *ProtocolConfig) acquireProbeSlot(ctx context.Context) (func(), bool) {
+	if c == nil || c.HandshakeProbeLimiter == nil {
+		return func() {}, true
+	}
+	return acquireProbeSlot(ctx, c.HandshakeProbeLimiter)
 }
