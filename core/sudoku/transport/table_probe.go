@@ -138,19 +138,6 @@ func selectTableByProbe(r *bufio.Reader, cfg *ProtocolConfig, tables []*sudoku.T
 
 	tmp := make([]byte, readChunk)
 	for {
-		// Once only one candidate remains, let the full handshake validate the
-		// key. A client may send only the first KIP record and wait for the
-		// response; probing it again here can wait for bytes that will not be
-		// sent until the server replies.
-		if len(candidates) == 1 {
-			tail, err := drainBuffered(r)
-			if err != nil {
-				return tableProbeChoice{}, nil, fmt.Errorf("drain buffered bytes failed: %w", err)
-			}
-			probe = append(probe, tail...)
-			return tableProbeChoice{Table: candidates[0].Table, PackedUplink: candidates[0].PackedUplink}, probe, nil
-		}
-
 		needMore := false
 		next := candidates[:0]
 		for _, candidate := range candidates {
