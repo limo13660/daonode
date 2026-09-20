@@ -181,7 +181,7 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 				return []*sudokuobfs.Table{table}, nil
 			})
 			cfg.TableFallbackProvider = transport.NewTableProvider(func() ([]*sudokuobfs.Table, error) {
-				fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy"}
+				fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy", "up_entropy_down_ascii"}
 				seen := map[string]struct{}{strings.ToLower(tableType): {}}
 				tables := make([]*sudokuobfs.Table, 0, len(fallbackTypes))
 				for _, fallbackType := range fallbackTypes {

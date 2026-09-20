@@ -114,8 +114,8 @@ func TestBuildUserConfigsStagesShadowrocketFallbackForLargeLists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build fallback tables: %v", err)
 	}
-	if len(fallback) != 2 {
-		t.Fatalf("fallback tables = %d, want 2", len(fallback))
+	if len(fallback) != 3 {
+		t.Fatalf("fallback tables = %d, want 3", len(fallback))
 	}
 	entry.cfg.TableFallbackProvider.Release()
 }

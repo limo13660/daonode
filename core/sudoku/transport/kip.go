@@ -216,9 +216,10 @@ func ResolveClientHelloTable(selected *sudokuobfs.Table, candidates []*sudokuobf
 	if hinted == nil {
 		return nil, fmt.Errorf("unknown table hint: %d", hello.TableHint)
 	}
-	if hinted != selected && (!hinted.IsASCII || !selected.IsASCII) {
-		return nil, fmt.Errorf("table hint %d mismatches probed uplink table", hello.TableHint)
-	}
+	// The encrypted hello has already been successfully decoded with the
+	// selected uplink table. Its hint is the authoritative full table identity,
+	// including the downlink direction; uplink-only probing cannot distinguish
+	// prefer_* from directional variants that share the same uplink layout.
 	return hinted, nil
 }
 

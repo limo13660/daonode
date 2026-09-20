@@ -307,8 +307,13 @@ func buildClientObfsConn(raw net.Conn, cfg *ProtocolConfig, table *sudoku.Table)
 	return newDirectionalConn(raw, downlinkReader, baseSudoku)
 }
 
-func buildServerObfsConn(raw net.Conn, cfg *ProtocolConfig, table *sudoku.Table, record bool) (*sudoku.Conn, net.Conn) {
-	uplinkSudoku := sudoku.NewConn(raw, table, cfg.PaddingMin, cfg.PaddingMax, record)
+func buildServerObfsConn(raw net.Conn, cfg *ProtocolConfig, table *sudoku.Table, record bool, packedUplink bool) (net.Conn, net.Conn) {
+	var uplinkSudoku net.Conn
+	if packedUplink {
+		uplinkSudoku = sudoku.NewPackedConnWithRecord(raw, table, cfg.PaddingMin, cfg.PaddingMax, record)
+	} else {
+		uplinkSudoku = sudoku.NewConn(raw, table, cfg.PaddingMin, cfg.PaddingMax, record)
+	}
 	downlinkWriter, closers := newServerDownlinkWriter(raw, table, cfg.PaddingMin, cfg.PaddingMax, cfg.EnablePureDownlink)
 	return uplinkSudoku, newDirectionalConn(raw, uplinkSudoku, downlinkWriter, closers...)
 }
@@ -449,7 +454,7 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 	}
 	defer releaseProbe()
 
-	selectedTable, preRead, err := selectTableByProbe(bufReader, cfg, cfg.tableCandidates())
+	selected, preRead, err := selectTableByProbe(bufReader, cfg, cfg.tableCandidates())
 	if err != nil {
 		combined := make([]byte, 0, len(httpHeaderData)+len(preRead))
 		combined = append(combined, httpHeaderData...)
@@ -458,7 +463,8 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 	}
 
 	baseConn := &preBufferedConn{Conn: rawConn, buf: preRead}
-	sConn, obfsConn := buildServerObfsConn(baseConn, cfg, selectedTable, true)
+	selectedTable := selected.Table
+	sConn, obfsConn := buildServerObfsConn(baseConn, cfg, selectedTable, true, selected.PackedUplink)
 
 	seed := ServerAEADSeed(cfg.Key)
 	pskC2S, pskS2C := derivePSKDirectionalBases(seed)
@@ -528,7 +534,9 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 		return nil, nil, &SuspiciousError{Err: fmt.Errorf("rekey failed: %w", err), Conn: &prefixedRecorderConn{Conn: sConn, prefix: httpHeaderData}}
 	}
 
-	sConn.StopRecording()
+	if recorder, ok := sConn.(interface{ StopRecording() }); ok {
+		recorder.StopRecording()
+	}
 	return rc, &HandshakeMeta{UserHash: userHashHex}, nil
 }
 

@@ -215,6 +215,35 @@ func TestLargeUserListRawPrimaryUserDoesNotWaitPerUUID(t *testing.T) {
 	}
 }
 
+func TestLargeUserListClientTableRotation(t *testing.T) {
+	users := make(map[int]panel.UserInfo, 615)
+	for id := 1; id <= 615; id++ {
+		users[id] = panel.UserInfo{Id: id, Uuid: fmt.Sprintf("rotating-sudoku-user-%d", id)}
+	}
+	server := startMultiUserSudokuServer(t, "raw", users)
+	target := startSudokuTestEchoServer(t)
+	for _, tableType := range []string{"prefer_entropy", "prefer_ascii"} {
+		t.Run(tableType, func(t *testing.T) {
+			key := users[615].Uuid
+			tables, err := transport.NewClientTablesWithCustomPatterns(transport.ClientAEADSeed(key), tableType, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := (&net.Dialer{}).Dial("tcp", server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn, err := transport.ClientHandshake(raw, &transport.ProtocolConfig{ServerAddress: server, Key: key, AEADMethod: "chacha20-poly1305", Tables: tables, PaddingMin: 0, PaddingMax: 0, EnablePureDownlink: true, DisableHTTPMask: true, HandshakeTimeoutSeconds: 10})
+			if err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			assertSudokuTCPEcho(t, conn, target, "rotation-"+tableType)
+		})
+	}
+}
+
 func startMultiUserHTTPMaskServer(t *testing.T, mode string, users map[int]panel.UserInfo) string {
 	t.Helper()
 	return startMultiUserSudokuServer(t, mode, users)

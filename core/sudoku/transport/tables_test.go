@@ -12,7 +12,7 @@ func TestServerTablesAcceptShadowrocketDefaultsAndIgnoreInvalidPattern(t *testin
 	if err != nil {
 		t.Fatalf("NewServerTablesWithCustomPatterns() error = %v", err)
 	}
-	if len(tables) != 3 {
+	if len(tables) != 4 {
 		t.Fatalf("got %d server tables, want symmetric and directional compatibility candidates", len(tables))
 	}
 }

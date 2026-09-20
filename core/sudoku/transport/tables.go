@@ -81,7 +81,7 @@ func NewServerTablesWithCustomPatterns(key string, tableType string, customTable
 	// keeping memory proportional to active handshake attempts instead of the
 	// entire panel user list.
 	if strings.TrimSpace(customTable) == "" && len(customTables) == 0 {
-		fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy"}
+		fallbackTypes := []string{"prefer_ascii", "prefer_entropy", "up_ascii_down_entropy", "up_entropy_down_ascii"}
 		seenTypes := map[string]struct{}{strings.ToLower(strings.TrimSpace(tableType)): {}}
 		for _, fallbackType := range fallbackTypes {
 			if _, exists := seenTypes[fallbackType]; exists {
