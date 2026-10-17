@@ -158,7 +158,7 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 			if o.Id != u.Id {
 				deleted = append(deleted, o)
 				added = append(added, u)
-			} else if o.DeviceLimit != u.DeviceLimit {
+			} else if o.DeviceLimit != u.DeviceLimit || o.SpeedLimit != u.SpeedLimit {
 				modified = append(modified, u)
 			}
 			delete(oldMap, u.Uuid)

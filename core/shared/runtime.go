@@ -13,7 +13,6 @@ import (
 
 	panel "github.com/limo13660/daonode/api/v2board"
 	"github.com/limo13660/daonode/common/format"
-	"github.com/limo13660/daonode/common/rate"
 	"github.com/limo13660/daonode/limiter"
 )
 
@@ -146,11 +145,7 @@ func (s *RuntimeServices) OpenConnection(user panel.UserInfo, conn net.Conn, tra
 	if !accepted {
 		return nil, nil, false
 	}
-	stream := net.Conn(conn)
-	if session.bucket != nil {
-		stream = rate.NewConnRateLimiter(stream, session.bucket)
-	}
-	return &accountedConn{Conn: stream, session: session}, session.Release, true
+	return &accountedConn{Conn: conn, session: session}, session.Release, true
 }
 
 // OpenSession applies the same user, device and speed policy for kernels that
@@ -173,11 +168,10 @@ func (s *RuntimeServices) openSession(user panel.UserInfo, closer io.Closer, ip 
 		return nil, false
 	}
 	userTag := format.UserTag(s.tag, user.Uuid)
-	bucket, reject := nodeLimiter.CheckLimit(userTag, ip, trackDevice)
+	_, reject := nodeLimiter.CheckLimit(userTag, ip, trackDevice)
 	if reject {
 		return nil, false
 	}
-
 	s.mu.Lock()
 	current, currentUser := s.users[user.Id]
 	if !currentUser || current.Uuid != user.Uuid {
@@ -191,7 +185,6 @@ func (s *RuntimeServices) openSession(user panel.UserInfo, closer io.Closer, ip 
 		service:     s,
 		uid:         user.Id,
 		closer:      closer,
-		bucket:      bucket,
 		nodeLimiter: nodeLimiter,
 		userTag:     userTag,
 		ip:          ip,
@@ -215,7 +208,6 @@ type Session struct {
 	service *RuntimeServices
 	uid     int
 	closer  io.Closer
-	bucket  *rate.DynamicBucket
 	counter *trafficCounter
 
 	nodeLimiter *limiter.Limiter
@@ -241,17 +233,25 @@ func (s *Session) RecordDownload(bytes int64) {
 	}
 }
 
-// WaitUpload applies the node speed limit before an upload operation.
+// WaitUpload applies the effective node-or-user speed limit before an upload.
 func (s *Session) WaitUpload(bytes int64) {
-	if s != nil && s.bucket != nil && bytes > 0 {
-		s.bucket.Get().Wait(bytes)
-	}
+	s.wait(bytes)
 }
 
-// WaitDownload applies the node speed limit before a download operation.
+// WaitDownload applies the effective node-or-user speed limit before a download.
 func (s *Session) WaitDownload(bytes int64) {
-	if s != nil && s.bucket != nil && bytes > 0 {
-		s.bucket.Get().Wait(bytes)
+	s.wait(bytes)
+}
+
+func (s *Session) wait(bytes int64) {
+	if s == nil || bytes <= 0 {
+		return
+	}
+	// Resolve the effective bucket for every operation so a panel speed-limit
+	// change also affects already-open sessions. A configured node bucket takes
+	// precedence over the user's bucket.
+	if bucket := s.nodeLimiter.SpeedLimiter(s.userTag); bucket != nil {
+		bucket.Get().Wait(bytes)
 	}
 }
 
@@ -294,11 +294,13 @@ type accountedConn struct {
 
 func (c *accountedConn) Read(buffer []byte) (int, error) {
 	n, err := c.Conn.Read(buffer)
+	c.session.WaitUpload(int64(n))
 	c.session.RecordUpload(int64(n))
 	return n, err
 }
 
 func (c *accountedConn) Write(buffer []byte) (int, error) {
+	c.session.WaitDownload(int64(len(buffer)))
 	n, err := c.Conn.Write(buffer)
 	c.session.RecordDownload(int64(n))
 	return n, err

@@ -66,3 +66,51 @@ func TestDelayedOfflineAcknowledgementDoesNotEraseReconnect(t *testing.T) {
 		t.Fatalf("delayed acknowledgement erased the reconnect state: %#v", offline)
 	}
 }
+
+func TestPerUserSpeedLimitIsCreatedAndUpdated(t *testing.T) {
+	Init()
+	const tag = "user-speed-limit-test"
+	limited := panel.UserInfo{Id: 10, Uuid: "limited", SpeedLimit: 10}
+	unlimited := panel.UserInfo{Id: 11, Uuid: "unlimited"}
+	current := AddLimiter("sudoku", tag, 100, []panel.UserInfo{limited, unlimited}, nil)
+	t.Cleanup(func() { DeleteLimiter(tag) })
+
+	limitedBucket := current.UserSpeedLimiter(format.UserTag(tag, limited.Uuid))
+	if limitedBucket == nil {
+		t.Fatal("limited user did not receive a speed bucket")
+	}
+	if unlimitedBucket := current.UserSpeedLimiter(format.UserTag(tag, unlimited.Uuid)); unlimitedBucket != nil {
+		t.Fatal("unlimited user received a speed bucket")
+	}
+	if effective := current.SpeedLimiter(format.UserTag(tag, limited.Uuid)); effective != current.NodeSpeedLimiter {
+		t.Fatal("node speed limit did not take precedence over the user limit")
+	}
+
+	current.UpdateUser(tag, nil, nil, []panel.UserInfo{{Id: limited.Id, Uuid: limited.Uuid, SpeedLimit: 20}})
+	if got := current.UserSpeedLimiter(format.UserTag(tag, limited.Uuid)); got != limitedBucket {
+		t.Fatal("speed-limit update replaced the active bucket")
+	}
+	current.UpdateUser(tag, nil, nil, []panel.UserInfo{{Id: limited.Id, Uuid: limited.Uuid, SpeedLimit: 0}})
+	if got := current.UserSpeedLimiter(format.UserTag(tag, limited.Uuid)); got != nil {
+		t.Fatal("clearing speed limit kept a user bucket")
+	}
+}
+
+func TestUserSpeedLimitIsEffectiveWhenNodeIsUnlimited(t *testing.T) {
+	Init()
+	const tag = "user-speed-only-test"
+	user := panel.UserInfo{Id: 12, Uuid: "speed-only", SpeedLimit: 100}
+	current := AddLimiter("sudoku", tag, 0, []panel.UserInfo{user}, nil)
+	t.Cleanup(func() { DeleteLimiter(tag) })
+
+	if current.NodeSpeedLimiter != nil {
+		t.Fatal("unlimited node unexpectedly created a node bucket")
+	}
+	userBucket := current.UserSpeedLimiter(format.UserTag(tag, user.Uuid))
+	if userBucket == nil {
+		t.Fatal("user speed limit did not create a bucket")
+	}
+	if effective := current.SpeedLimiter(format.UserTag(tag, user.Uuid)); effective != userBucket {
+		t.Fatal("user speed limit was not selected for an unlimited node")
+	}
+}

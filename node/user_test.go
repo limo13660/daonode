@@ -8,12 +8,12 @@ import (
 
 func TestCompareUserListContract(t *testing.T) {
 	oldUsers := []panel.UserInfo{
-		{Id: 1, Uuid: "stable", DeviceLimit: 1},
+		{Id: 1, Uuid: "stable", DeviceLimit: 1, SpeedLimit: 10},
 		{Id: 2, Uuid: "old-password", DeviceLimit: 2},
 		{Id: 3, Uuid: "deleted", DeviceLimit: 3},
 	}
 	newUsers := []panel.UserInfo{
-		{Id: 1, Uuid: "stable", DeviceLimit: 9},
+		{Id: 1, Uuid: "stable", DeviceLimit: 9, SpeedLimit: 20},
 		{Id: 2, Uuid: "new-password", DeviceLimit: 2},
 		{Id: 4, Uuid: "added", DeviceLimit: 4},
 	}
@@ -25,6 +25,9 @@ func TestCompareUserListContract(t *testing.T) {
 	assertUserIDs(t, "modified", modified, map[int]bool{1: true})
 	if modified[0].DeviceLimit != 9 {
 		t.Fatalf("modified user DeviceLimit = %d, want 9", modified[0].DeviceLimit)
+	}
+	if modified[0].SpeedLimit != 20 {
+		t.Fatalf("modified user SpeedLimit = %d, want 20", modified[0].SpeedLimit)
 	}
 }
 

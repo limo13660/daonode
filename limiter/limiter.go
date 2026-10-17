@@ -38,8 +38,10 @@ type onlineUserState struct {
 }
 
 type UserLimitInfo struct {
-	UID         int
-	DeviceLimit int
+	UID              int
+	DeviceLimit      int
+	SpeedLimit       int                 // Per-user aggregate speed limit in Mbps.
+	UserSpeedLimiter *rate.DynamicBucket // Nil when the user is unlimited.
 }
 
 // OfflineUser identifies an exact locally-offline user snapshot. UserTag is
@@ -64,16 +66,25 @@ func AddLimiter(nodetype string, tag string, speedLimit int, users []panel.UserI
 		l.NodeSpeedLimiter = rate.NewDynamicBucket(int64(speedLimit) * 1000000 / 8)
 	}
 	for i := range users {
-		userLimit := &UserLimitInfo{UID: users[i].Id}
-		if users[i].DeviceLimit != 0 {
-			userLimit.DeviceLimit = users[i].DeviceLimit
-		}
+		userLimit := newUserLimitInfo(users[i])
 		l.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
 	}
 	limitLock.Lock()
 	limiter[tag] = l
 	limitLock.Unlock()
 	return l
+}
+
+func newUserLimitInfo(user panel.UserInfo) *UserLimitInfo {
+	info := &UserLimitInfo{
+		UID:         user.Id,
+		DeviceLimit: user.DeviceLimit,
+		SpeedLimit:  user.SpeedLimit,
+	}
+	if user.SpeedLimit > 0 {
+		info.UserSpeedLimiter = rate.NewDynamicBucket(int64(user.SpeedLimit) * 1000000 / 8)
+	}
+	return info
 }
 
 func GetLimiter(tag string) (info *Limiter, err error) {
@@ -101,15 +112,20 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, modified[i].Uuid)); ok {
 			u := v.(*UserLimitInfo)
 			u.DeviceLimit = modified[i].DeviceLimit
+			u.SpeedLimit = modified[i].SpeedLimit
+			if modified[i].SpeedLimit > 0 {
+				if u.UserSpeedLimiter == nil {
+					u.UserSpeedLimiter = rate.NewDynamicBucket(int64(modified[i].SpeedLimit) * 1000000 / 8)
+				} else {
+					u.UserSpeedLimiter.Update(int64(modified[i].SpeedLimit) * 1000000 / 8)
+				}
+			} else {
+				u.UserSpeedLimiter = nil
+			}
 		}
 	}
 	for i := range added {
-		userLimit := &UserLimitInfo{
-			UID: added[i].Id,
-		}
-		if added[i].DeviceLimit != 0 {
-			userLimit.DeviceLimit = added[i].DeviceLimit
-		}
+		userLimit := newUserLimitInfo(added[i])
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
 	}
 	l.userMu.Unlock()
@@ -163,6 +179,28 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	}
 
 	return l.NodeSpeedLimiter, false
+}
+
+// UserSpeedLimiter returns the current per-user bucket. The returned bucket
+// remains valid for existing sessions when the panel changes its rate.
+func (l *Limiter) UserSpeedLimiter(taguuid string) *rate.DynamicBucket {
+	l.userMu.RLock()
+	defer l.userMu.RUnlock()
+	value, ok := l.UserLimitInfo.Load(taguuid)
+	if !ok {
+		return nil
+	}
+	return value.(*UserLimitInfo).UserSpeedLimiter
+}
+
+// SpeedLimiter returns the effective bandwidth bucket for a connection.
+// A configured node limit takes precedence over the panel user's limit. When
+// the node is unlimited, the user's own bucket is used instead.
+func (l *Limiter) SpeedLimiter(taguuid string) *rate.DynamicBucket {
+	if l.NodeSpeedLimiter != nil {
+		return l.NodeSpeedLimiter
+	}
+	return l.UserSpeedLimiter(taguuid)
 }
 
 func (l *Limiter) trackConnection(taguuid string, uid int, ip string, aliveIP, deviceLimit int) bool {
