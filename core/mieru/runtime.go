@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/netip"
@@ -266,6 +267,10 @@ func (m *mieruRuntime) restartLocked() error {
 		return fmt.Errorf("configure routes: %w", err)
 	}
 	if len(m.users) == 0 {
+		// Mieru's mux waits for every underlay session during Close. Close the
+		// protocol-owned sessions first so a user/config reload cannot hold the
+		// runtime mutex until the stop timeout expires.
+		m.RuntimeServices.CloseAllConnections()
 		if err := m.stopLocked(false); err != nil {
 			return err
 		}
@@ -305,6 +310,10 @@ func (m *mieruRuntime) restartLocked() error {
 	if err := server.Store(serverConfig); err != nil {
 		return fmt.Errorf("store mieru config: %w", err)
 	}
+	// A reload must revoke old credentials and release active Mieru sessions
+	// before the upstream mux is stopped. Otherwise Mux.Close can block while
+	// waiting for underlays that still own those sessions.
+	m.RuntimeServices.CloseAllConnections()
 	if err := m.stopLocked(false); err != nil {
 		return err
 	}
@@ -416,6 +425,9 @@ func (m *mieruRuntime) acceptLoop(server mieruserver.Server, stopCh <-chan struc
 func isExpectedMieruHandshakeError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
 	}
 	message := strings.ToLower(err.Error())
 	for _, fragment := range []string{
