@@ -85,7 +85,11 @@ func (s *hotMieruServer) Start() error {
 	if configuredMTU := s.config.Config.GetMtu(); configuredMTU != 0 {
 		mtu = int(configuredMTU)
 	}
-	endpoints, err := appctlcommon.PortBindingsToUnderlayProperties(s.config.Config.GetPortBindings(), mtu)
+	endpoints, err := appctlcommon.AddrPortToUnderlayProperties(
+		s.config.Config.GetListenIPAddress(),
+		s.config.Config.GetPortBindings(),
+		mtu,
+	)
 	if err != nil {
 		return err
 	}

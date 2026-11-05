@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/limo13660/daonode/core/sudoku/transport/crypto"
@@ -18,7 +19,11 @@ import (
 const earlyKIPHandshakeTTL = 60 * time.Second
 
 type EarlyCodecConfig struct {
-	PSK                string
+	PSK string
+	// ExpectedUserHash is set by the server for a UUID-specific config. It
+	// lets early HTTPMask probing reject a wrong key before touching replay
+	// state or performing X25519 work.
+	ExpectedUserHash   string
 	AEAD               string
 	EnablePureDownlink bool
 	PaddingMin         int
@@ -279,6 +284,9 @@ func processEarlyClientPayloadForTable(cfg EarlyCodecConfig, tables []*sudokuobf
 	}
 
 	userHash := hex.EncodeToString(ch.UserHash[:])
+	if expected := cfg.ExpectedUserHash; expected != "" && !strings.EqualFold(expected, userHash) {
+		return nil, fmt.Errorf("user hash mismatch")
+	}
 	if allowReplay != nil && !allowReplay(userHash, ch.Nonce, time.Now()) {
 		return nil, fmt.Errorf("replay detected")
 	}

@@ -37,10 +37,9 @@ var errHTTPMaskHandled = errors.New("Sudoku HTTPMask control connection handled"
 // X25519). Keep unauthenticated work bounded so a burst of probes cannot
 // starve established proxy sessions or make the host appear hung.
 const (
-	// Small nodes commonly have only a handful of users. Keep their historical
-	// eager configuration behavior (and make validation failures visible during
-	// sync), while large panel user lists use the lazy provider below.
-	eagerSudokuTableUserLimit = 8
+	// All table providers remain lazy; panel sync must not allocate a DecodeMap
+	// per UUID. Default compatibility tables are staged below as well, so a
+	// normal first handshake only builds the panel-selected table.
 	// HTTPMask uses several TCP sockets for one logical connection, so retain
 	// enough handshake slots for its control/data paths. The CPU-heavy table
 	// probes are serialized separately by handshakeProbeSlots below.
@@ -50,6 +49,7 @@ const (
 	// those control sockets plus one real Sudoku handshake, while the global
 	// limit still bounds the expensive table/AEAD work.
 	maxConcurrentSudokuHandshakesPerSource = 4
+	maxUoTFlowsPerConnection               = 256
 	// A bad table/key or non-Sudoku probe can otherwise reconnect in a tight
 	// loop and repeat the full multi-user search forever. A short source
 	// cooldown bounds that failure mode without delaying an established client.
@@ -89,6 +89,10 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 		return nil, err
 	}
 	ps := info.Common.ProtocolSettings
+	const maxSudokuCustomTables = 8
+	if len(ps.CustomTables) > maxSudokuCustomTables {
+		return nil, fmt.Errorf("Sudoku custom_tables cannot contain more than %d entries", maxSudokuCustomTables)
+	}
 	aead := strings.ToLower(strings.TrimSpace(ps.AEADMethod))
 	if aead == "" {
 		aead = "chacha20-poly1305"
@@ -161,10 +165,10 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 			}
 			return tables, buildErr
 		}
-		// For large user lists, defer Shadowrocket compatibility tables until
-		// the panel-selected table has failed. This keeps the common first
-		// connection path at one DecodeMap per UUID instead of three.
-		stagedCompatibility := len(users) > eagerSudokuTableUserLimit && strings.TrimSpace(customTable) == "" && len(patterns) == 0
+		// Defer Shadowrocket compatibility tables until the panel-selected table
+		// has failed. This keeps the common first connection path at one DecodeMap
+		// per UUID instead of building every compatibility layout eagerly.
+		stagedCompatibility := strings.TrimSpace(customTable) == "" && len(patterns) == 0
 		if stagedCompatibility {
 			cfg.TableProvider = transport.NewTableProvider(func() ([]*sudokuobfs.Table, error) {
 				started := time.Now()
@@ -200,30 +204,6 @@ func buildUserConfigsWithPrevious(info *panel.NodeInfo, users map[int]panel.User
 			})
 		} else {
 			cfg.TableProvider = transport.NewTableProvider(buildTables)
-		}
-		if len(users) <= eagerSudokuTableUserLimit {
-			// Small deployments keep the complete candidate set in the config
-			// so validation and compatibility behavior remain unchanged.
-			if cfg.TableFallbackProvider != nil {
-				fallback, fallbackErr := cfg.TableFallbackProvider.Tables()
-				if fallbackErr != nil {
-					return nil, fmt.Errorf("build Sudoku fallback table for user %d: %w", user.Id, fallbackErr)
-				}
-				primary, primaryErr := cfg.TableProvider.Tables()
-				if primaryErr != nil {
-					return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, primaryErr)
-				}
-				cfg.Tables = append(primary, fallback...)
-				cfg.TableProvider = nil
-				cfg.TableFallbackProvider = nil
-			} else {
-				tables, buildErr := cfg.TableProvider.Tables()
-				if buildErr != nil {
-					return nil, fmt.Errorf("build Sudoku table for user %d: %w", user.Id, buildErr)
-				}
-				cfg.Tables = tables
-				cfg.TableProvider = nil
-			}
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate Sudoku user %d: %w", user.Id, err)
@@ -358,7 +338,7 @@ func startServer(info *panel.NodeInfo, services *shared.RuntimeServices, users *
 	s.installHandshakeProbeLimiter(users)
 	s.users.Store(users)
 	go s.serve()
-	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash), "lazy_tables": len(users.byHash) > eagerSudokuTableUserLimit}).Info("Sudoku runtime started")
+	log.WithFields(log.Fields{"protocol": "sudoku", "port": info.Common.ServerPort, "listen_ip": info.Common.ListenIP, "users": len(users.byHash), "lazy_tables": true}).Info("Sudoku runtime started")
 	return s, nil
 }
 
@@ -958,6 +938,10 @@ func (s *serverInstance) handleUoT(conn net.Conn, user panel.UserInfo, session *
 		flowsMu.Lock()
 		flow := flows[target]
 		if flow == nil {
+			if len(flows) >= maxUoTFlowsPerConnection {
+				flowsMu.Unlock()
+				continue
+			}
 			out, dialErr := net.DialUDP("udp", nil, udpAddr)
 			if dialErr == nil {
 				flow = &udpFlow{

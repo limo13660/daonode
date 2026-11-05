@@ -94,6 +94,53 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	return nil
 }
 
+// reportPendingOfflineUsers clears online entries left by a previous process.
+// The panel stores online IPs per node, so an empty list removes this node's
+// old contribution without affecting the same user on another node.
+func (c *Controller) reportPendingOfflineUsers(ctx context.Context) error {
+	if c == nil || c.limiter == nil || c.apiClient == nil {
+		return nil
+	}
+	offline := c.limiter.GetPendingOfflineUsers()
+	if len(offline) == 0 {
+		return nil
+	}
+	data := make(map[int][]string, len(offline))
+	for _, item := range offline {
+		data[item.UID] = []string{}
+	}
+	if err := c.apiClient.ReportNodeOnlineUsers(ctx, &data); err != nil {
+		return err
+	}
+	c.limiter.MarkOfflineUsersReported(offline)
+	return nil
+}
+
+func (c *Controller) refreshAliveList(ctx context.Context) error {
+	if c == nil || c.limiter == nil || c.apiClient == nil {
+		return nil
+	}
+	alive, err := c.apiClient.GetUserAlive(ctx)
+	if err != nil {
+		return err
+	}
+	c.limiter.SetAliveList(alive)
+	c.stateMu.Lock()
+	c.aliveMap = cloneAliveMap(alive)
+	c.stateMu.Unlock()
+	return nil
+}
+
+func aliveUserIDs(alive map[int]int) []int {
+	result := make([]int, 0, len(alive))
+	for uid, count := range alive {
+		if uid > 0 && count > 0 {
+			result = append(result, uid)
+		}
+	}
+	return result
+}
+
 // flushUserTraffic makes one non-retried, best-effort submission after the
 // periodic tasks have stopped and before the runtime counters are discarded.
 // A failed submission is deliberately left uncommitted.

@@ -47,6 +47,17 @@ func TestChangedUserIDRotatesThePanelScopedUsername(t *testing.T) {
 	}
 }
 
+func TestAliveUserIDsIncludesUsersMissingFromCurrentList(t *testing.T) {
+	got := aliveUserIDs(map[int]int{1: 2, 2: 0, 99: 1})
+	gotMap := make(map[int]bool, len(got))
+	for _, uid := range got {
+		gotMap[uid] = true
+	}
+	if len(gotMap) != 2 || !gotMap[1] || !gotMap[99] {
+		t.Fatalf("alive user IDs = %#v, want 1 and 99", got)
+	}
+}
+
 func assertUserIDs(t *testing.T, label string, users []panel.UserInfo, want map[int]bool) {
 	t.Helper()
 	if len(users) != len(want) {

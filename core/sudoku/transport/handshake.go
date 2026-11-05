@@ -490,6 +490,9 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 	}
 
 	userHashHex := hex.EncodeToString(ch.UserHash[:])
+	if expected := KIPUserHashHexFromKey(cfg.Key); !strings.EqualFold(expected, userHashHex) {
+		return nil, nil, &SuspiciousError{Err: fmt.Errorf("user hash mismatch"), Conn: &prefixedRecorderConn{Conn: sConn, prefix: httpHeaderData}}
+	}
 	if !globalHandshakeReplay.allow(userHashHex, ch.Nonce, time.Now()) {
 		return nil, nil, &SuspiciousError{Err: fmt.Errorf("replay"), Conn: &prefixedRecorderConn{Conn: sConn, prefix: httpHeaderData}}
 	}

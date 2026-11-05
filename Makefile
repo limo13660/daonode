@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 
 GO ?= go
-REQUIRED_GO_VERSION := go1.26.1
+REQUIRED_GO_VERSION := go1.27.3
 REQUIRED_GOEXPERIMENT := jsonv2
 BUILD_TAGS := with_quic
 VERSION ?= dev

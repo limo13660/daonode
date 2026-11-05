@@ -118,6 +118,20 @@ func (c *Controller) Start(x *core.V2Core) error {
 		users,
 		alive,
 	)
+	// A process restart loses the previous IP snapshot, but the panel may
+	// still retain this node's last online report. Queue those users for an
+	// explicit empty-state report before accepting new connections.
+	staleOnlineUIDs := aliveUserIDs(alive)
+	c.limiter.QueueOfflineUIDs(tag, staleOnlineUIDs)
+	if len(staleOnlineUIDs) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.reportPendingOfflineUsers(ctx); err != nil {
+			log.WithFields(log.Fields{"tag": tag, "err": err, "users": len(staleOnlineUIDs)}).Warn("Clear stale online users failed; will retry")
+		} else if err := c.refreshAliveList(ctx); err != nil {
+			log.WithFields(log.Fields{"tag": tag, "err": err}).Warn("Refresh alive list after stale-online cleanup failed")
+		}
+		cancel()
+	}
 	added, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      tag,
 		Users:    users,
@@ -205,14 +219,23 @@ func (c *Controller) Close() error {
 		if stopErr := c.server.StopNode(c.tag); stopErr != nil {
 			log.WithFields(log.Fields{"tag": c.tag, "err": stopErr}).Warn("Stop runtime before final traffic flush failed")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := c.flushUserTraffic(ctx); err != nil {
+		trafficCtx, trafficCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.flushUserTraffic(trafficCtx); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
 			}).Warn("Flush user traffic before stopping runtime failed")
 		}
-		cancel()
+		trafficCancel()
+		c.stateMu.RLock()
+		alive := cloneAliveMap(c.aliveMap)
+		c.stateMu.RUnlock()
+		c.limiter.QueueOfflineUIDs(c.tag, aliveUserIDs(alive))
+		onlineCtx, onlineCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.reportPendingOfflineUsers(onlineCtx); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Clear online users before shutdown failed")
+		}
+		onlineCancel()
 	}
 	var err error
 	if c.active && c.server != nil && c.tag != "" {

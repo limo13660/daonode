@@ -3,6 +3,7 @@ package limiter
 import (
 	"errors"
 	"maps"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -301,6 +302,51 @@ func (l *Limiter) GetPendingOfflineUsers() []OfflineUser {
 		result = append(result, OfflineUser{UserTag: taguuid, UID: uid})
 	}
 	return result
+}
+
+// QueueOfflineUsers marks exact users that may still be present in the panel's
+// node-online cache for an empty-state report. An active local connection wins
+// over the stale snapshot and is left alone.
+func (l *Limiter) QueueOfflineUsers(tag string, users []panel.UserInfo) {
+	if l == nil || tag == "" || len(users) == 0 {
+		return
+	}
+	l.onlineMu.Lock()
+	defer l.onlineMu.Unlock()
+	for _, user := range users {
+		taguuid := format.UserTag(tag, user.Uuid)
+		if state := l.online[taguuid]; state != nil && len(state.ips) > 0 {
+			continue
+		}
+		l.pendingOffline[taguuid] = user.Id
+	}
+}
+
+// QueueOfflineUIDs marks panel users that may still have a stale online entry
+// even when they are no longer present in the current user list. The marker is
+// namespaced so it cannot collide with a live UUID session.
+func (l *Limiter) QueueOfflineUIDs(tag string, uids []int) {
+	if l == nil || tag == "" || len(uids) == 0 {
+		return
+	}
+	l.onlineMu.Lock()
+	defer l.onlineMu.Unlock()
+	for _, uid := range uids {
+		if uid <= 0 || l.hasActiveUIDLocked(uid) {
+			continue
+		}
+		key := format.UserTag(tag, "\x00offline:"+strconv.Itoa(uid))
+		l.pendingOffline[key] = uid
+	}
+}
+
+func (l *Limiter) hasActiveUIDLocked(uid int) bool {
+	for _, state := range l.online {
+		if state != nil && state.uid == uid && len(state.ips) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // MarkOfflineUsersReported clears only offline snapshots that are still

@@ -773,6 +773,23 @@ func (s *TunnelServer) handlePoll(rawConn net.Conn, req *httpRequestHeader, head
 }
 
 func (s *TunnelServer) sessionAuthorize(rawConn net.Conn, headerBytes, buffered, earlyPayload []byte) (HandleResult, net.Conn, error) {
+	// Reject before allocating pipe endpoints or running the CPU-heavy early
+	// Sudoku handshake. The second check below closes the race with another
+	// authorize request that wins the slot between these two sections.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = rawConn.Close()
+		return HandleDone, nil, net.ErrClosed
+	}
+	if len(s.sessions) >= maxTunnelSessions {
+		s.mu.Unlock()
+		_ = writeSimpleHTTPResponse(rawConn, http.StatusTooManyRequests, "too many sessions")
+		_ = rawConn.Close()
+		return HandleDone, nil, nil
+	}
+	s.mu.Unlock()
+
 	token, err := newSessionToken()
 	if err != nil {
 		_ = writeSimpleHTTPResponse(rawConn, http.StatusInternalServerError, "internal error")

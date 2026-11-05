@@ -22,10 +22,12 @@ const (
 	headerSize = 1 + 4 + 4
 	// maxQueuedBytesPerStream bounds unread payload retained by a single logical stream.
 	// A stream that exceeds the limit is reset so it cannot block the shared demux loop.
-	maxQueuedBytesPerStream = 4 * 1024 * 1024
-	maxFrameSize            = 256 * 1024
-	maxDataPayload          = 128 * 1024
-	keepaliveInterval       = 15 * time.Second
+	maxQueuedBytesPerStream  = 4 * 1024 * 1024
+	maxQueuedBytesPerSession = 16 * 1024 * 1024
+	maxStreamsPerSession     = 256
+	maxFrameSize             = 256 * 1024
+	maxDataPayload           = 128 * 1024
+	keepaliveInterval        = 15 * time.Second
 )
 
 var errMuxReceiveQueueFull = errors.New("mux receive queue full")
@@ -51,6 +53,7 @@ type Session struct {
 	closeErr  error
 
 	lastWrite     atomic.Int64
+	queuedBytes   atomic.Int64
 	keepaliveOnce sync.Once
 }
 
@@ -166,6 +169,29 @@ func (s *Session) removeStream(id uint32) {
 	s.streamsMu.Lock()
 	delete(s.streams, id)
 	s.streamsMu.Unlock()
+}
+
+func (s *Session) reserveQueuedBytes(n int) bool {
+	if s == nil || n <= 0 {
+		return n == 0
+	}
+	for {
+		current := s.queuedBytes.Load()
+		next := current + int64(n)
+		if next > maxQueuedBytesPerSession {
+			return false
+		}
+		if s.queuedBytes.CompareAndSwap(current, next) {
+			return true
+		}
+	}
+}
+
+func (s *Session) releaseQueuedBytes(n int) {
+	if s == nil || n <= 0 {
+		return
+	}
+	s.queuedBytes.Add(-int64(n))
 }
 
 func (s *Session) nextStreamID() uint32 {
@@ -312,16 +338,26 @@ func (s *Session) readLoop() {
 				s.sendReset(streamID, "stream already exists")
 				continue
 			}
+			s.streamsMu.Lock()
+			streamCount := len(s.streams)
+			s.streamsMu.Unlock()
+			if streamCount >= maxStreamsPerSession {
+				s.closeWithError(fmt.Errorf("mux stream limit exceeded: %d", maxStreamsPerSession))
+				return
+			}
 			st := newStream(s, streamID)
 			s.registerStream(st)
-			go func() {
-				select {
-				case s.acceptCh <- acceptEvent{stream: st, payload: payload}:
-				case <-s.closed:
-					st.closeNoSend(io.ErrClosedPipe)
-					s.removeStream(streamID)
-				}
-			}()
+			select {
+			case s.acceptCh <- acceptEvent{stream: st, payload: payload}:
+			case <-s.closed:
+				st.closeNoSend(io.ErrClosedPipe)
+				s.removeStream(streamID)
+			default:
+				st.closeNoSend(errors.New("mux accept queue full"))
+				s.removeStream(streamID)
+				s.closeWithError(errors.New("mux accept queue full"))
+				return
+			}
 
 		case frameData:
 			st := s.getStream(streamID)
@@ -436,8 +472,15 @@ func (c *stream) closeNoSend(err error) {
 	if c.closeErr == nil {
 		c.closeErr = err
 	}
+	dropped := c.queuedBytes
+	c.readBuf = nil
+	c.queue = nil
+	c.queuedBytes = 0
 	c.cond.Broadcast()
 	c.mu.Unlock()
+	if c.session != nil {
+		c.session.releaseQueuedBytes(dropped)
+	}
 }
 
 func (c *stream) closeRemoteWrite() bool {
@@ -506,6 +549,9 @@ func (c *stream) Read(p []byte) (int, error) {
 		c.queuedBytes = 0
 	}
 	c.cond.Broadcast()
+	if c.session != nil {
+		c.session.releaseQueuedBytes(n)
+	}
 	return n, nil
 }
 
@@ -565,11 +611,15 @@ func (c *stream) Close() error {
 	if c.closeErr == nil {
 		c.closeErr = io.ErrClosedPipe
 	}
+	dropped := c.queuedBytes
 	c.readBuf = nil
 	c.queue = nil
 	c.queuedBytes = 0
 	c.cond.Broadcast()
 	c.mu.Unlock()
+	if c.session != nil {
+		c.session.releaseQueuedBytes(dropped)
+	}
 
 	if c.session != nil {
 		if sendClose {
@@ -610,12 +660,16 @@ func (c *stream) CloseRead() error {
 		return nil
 	}
 	c.localReadClosed = true
+	dropped := c.queuedBytes
 	c.readBuf = nil
 	c.queue = nil
 	c.queuedBytes = 0
 	remove := c.localWriteClosed
 	c.cond.Broadcast()
 	c.mu.Unlock()
+	if c.session != nil {
+		c.session.releaseQueuedBytes(dropped)
+	}
 
 	if remove && c.session != nil {
 		c.session.removeStream(c.id)
@@ -641,7 +695,13 @@ func (c *stream) enqueue(payload []byte) error {
 	if c.closed || c.localReadClosed || c.remoteWriteClosed {
 		return nil
 	}
+	if c.session == nil {
+		return io.ErrClosedPipe
+	}
 	if c.queuedBytes+len(payload) > maxQueuedBytesPerStream {
+		return errMuxReceiveQueueFull
+	}
+	if !c.session.reserveQueuedBytes(len(payload)) {
 		return errMuxReceiveQueueFull
 	}
 	c.queuedBytes += len(payload)

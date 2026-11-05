@@ -286,6 +286,7 @@ func (m *mieruRuntime) restartLocked() error {
 	users := m.mieruServerUsersLocked()
 
 	config := &appctlpb.ServerConfig{
+		ListenIPAddress: proto.String(m.info.Common.ListenIP),
 		PortBindings: portBindings,
 		Users:        users,
 		Mtu:          proto.Int32(int32(m.info.Common.MTU)),

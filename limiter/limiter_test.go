@@ -67,6 +67,45 @@ func TestDelayedOfflineAcknowledgementDoesNotEraseReconnect(t *testing.T) {
 	}
 }
 
+func TestQueueOfflineUsersClearsRestartSnapshotButKeepsActiveConnection(t *testing.T) {
+	Init()
+	const tag = "restart-online-cleanup-test"
+	users := []panel.UserInfo{
+		{Id: 1, Uuid: "stale"},
+		{Id: 2, Uuid: "active"},
+	}
+	current := AddLimiter("sudoku", tag, 0, users, map[int]int{1: 1, 2: 1})
+	t.Cleanup(func() { DeleteLimiter(tag) })
+
+	userTag := format.UserTag(tag, users[1].Uuid)
+	if _, rejected := current.CheckLimit(userTag, "198.51.100.20", true); rejected {
+		t.Fatal("active connection was rejected")
+	}
+	current.QueueOfflineUsers(tag, users)
+
+	offline := current.GetPendingOfflineUsers()
+	if len(offline) != 1 || offline[0].UID != users[0].Id {
+		t.Fatalf("queued offline users = %#v, want only stale UID %d", offline, users[0].Id)
+	}
+	current.MarkOfflineUsersReported(offline)
+	if pending := current.GetPendingOfflineUsers(); len(pending) != 0 {
+		t.Fatalf("offline users remained after acknowledgement: %#v", pending)
+	}
+}
+
+func TestQueueOfflineUIDsIncludesDeletedUsers(t *testing.T) {
+	Init()
+	const tag = "restart-deleted-online-test"
+	current := AddLimiter("sudoku", tag, 0, nil, map[int]int{99: 1})
+	t.Cleanup(func() { DeleteLimiter(tag) })
+
+	current.QueueOfflineUIDs(tag, []int{99})
+	offline := current.GetPendingOfflineUsers()
+	if len(offline) != 1 || offline[0].UID != 99 {
+		t.Fatalf("queued offline users = %#v, want deleted UID 99", offline)
+	}
+}
+
 func TestPerUserSpeedLimitIsCreatedAndUpdated(t *testing.T) {
 	Init()
 	const tag = "user-speed-limit-test"

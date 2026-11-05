@@ -62,8 +62,15 @@ func TestBuildUserConfigsUsesUUIDKeysAndPreservesSettings(t *testing.T) {
 			cfg.HTTPMaskPathRoot != "sudoku" || cfg.MultiplexMode() != "on" {
 			t.Fatalf("user %d HTTPMask settings = %#v", user.Id, cfg)
 		}
-		if len(cfg.Tables) < 2 {
-			t.Fatalf("user %d tables = %d, want custom table candidates", user.Id, len(cfg.Tables))
+		if cfg.TableProvider == nil {
+			t.Fatalf("user %d table provider is nil", user.Id)
+		}
+		tables, err := cfg.TableProvider.Tables()
+		if err != nil {
+			t.Fatalf("user %d build tables: %v", user.Id, err)
+		}
+		if len(tables) < 2 {
+			t.Fatalf("user %d tables = %d, want custom table candidates", user.Id, len(tables))
 		}
 	}
 }
@@ -80,18 +87,29 @@ func TestBuildUserConfigsAcceptsShadowrocketDefaultTable(t *testing.T) {
 		t.Fatalf("buildUserConfigs() error = %v", err)
 	}
 	entry := snapshot.byHash[transport.KIPUserHashHexFromKey("shadowrocket-user")]
-	if entry.cfg == nil || len(entry.cfg.Tables) < 2 {
+	if entry.cfg == nil || entry.cfg.TableProvider == nil {
 		t.Fatalf("table candidates = %#v, want configured and compatibility tables", entry.cfg)
 	}
-	if entry.cfg.Tables[0].Hint() == entry.cfg.Tables[1].Hint() {
+	primary, err := entry.cfg.TableProvider.Tables()
+	if err != nil {
+		t.Fatalf("build primary table: %v", err)
+	}
+	if len(primary) != 1 || entry.cfg.TableFallbackProvider == nil {
+		t.Fatalf("table candidates = %d, fallback = %#v, want staged compatibility tables", len(primary), entry.cfg.TableFallbackProvider)
+	}
+	fallback, err := entry.cfg.TableFallbackProvider.Tables()
+	if err != nil {
+		t.Fatalf("build compatibility tables: %v", err)
+	}
+	if len(fallback) == 0 || primary[0].Hint() == fallback[0].Hint() {
 		t.Fatal("configured and compatibility tables have the same hint")
 	}
 }
 
 func TestBuildUserConfigsStagesShadowrocketFallbackForLargeLists(t *testing.T) {
 	info := sudokuNodeInfo()
-	users := make(map[int]panel.UserInfo, eagerSudokuTableUserLimit+1)
-	for id := 1; id <= eagerSudokuTableUserLimit+1; id++ {
+	users := make(map[int]panel.UserInfo, 9)
+	for id := 1; id <= 9; id++ {
 		users[id] = panel.UserInfo{Id: id, Uuid: fmt.Sprintf("staged-sudoku-user-%d", id)}
 	}
 	snapshot, err := buildUserConfigs(info, users)

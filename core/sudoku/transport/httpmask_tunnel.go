@@ -32,6 +32,7 @@ func HTTPMaskRejected(conn net.Conn) bool {
 func newHTTPMaskEarlyCodecConfig(cfg *ProtocolConfig, psk string) EarlyCodecConfig {
 	return EarlyCodecConfig{
 		PSK:                psk,
+		ExpectedUserHash:   KIPUserHashHexFromKey(cfg.Key),
 		AEAD:               cfg.AEADMethod,
 		EnablePureDownlink: cfg.EnablePureDownlink,
 		PaddingMin:         cfg.PaddingMin,

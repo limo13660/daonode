@@ -559,6 +559,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 }
 
 func validateSudokuProtocolSettings(settings *ProtocolSettings) error {
+	const maxSudokuCustomTables = 8
 	if settings == nil {
 		return fmt.Errorf("Sudoku protocol settings are missing")
 	}
@@ -613,6 +614,9 @@ func validateSudokuProtocolSettings(settings *ProtocolSettings) error {
 	}
 	if err := validateSudokuTablePattern(settings.CustomTable); err != nil {
 		return err
+	}
+	if len(settings.CustomTables) > maxSudokuCustomTables {
+		return fmt.Errorf("Sudoku custom_tables cannot contain more than %d entries", maxSudokuCustomTables)
 	}
 	for index, pattern := range settings.CustomTables {
 		if err := validateSudokuTablePattern(pattern); err != nil {

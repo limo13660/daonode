@@ -6,7 +6,7 @@ daonode embeds the Mieru server API from:
 
 - Project: https://github.com/enfein/mieru
 - Module: `github.com/enfein/mieru/v3`
-- Version: `v3.36.0`
+- Version: `v3.39.0`
 - License: GNU General Public License v3.0
 
 The GPL-3.0 license text is included in `LICENSE-GPL-3.0`.
@@ -22,7 +22,7 @@ official server setup:
 
 - Project: https://github.com/klzgrad/forwardproxy/tree/naive
 - Module replacement: `github.com/caddyserver/forwardproxy` -> `github.com/klzgrad/forwardproxy`
-- Commit: `d62c80d3dd2c706b6b87579844d2397bddd18317`
+- Version: `v2.11.7-naive2`
 - License: Apache License 2.0
 
 The surrounding Caddy and quic-go modules retain their respective upstream

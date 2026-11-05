@@ -165,8 +165,8 @@ func TestEstablishedSessionsReleaseHandshakeSlots(t *testing.T) {
 }
 
 func TestLargeUserListSupportsShadowrocketFallbackTable(t *testing.T) {
-	users := make(map[int]panel.UserInfo, eagerSudokuTableUserLimit+1)
-	for id := 1; id <= eagerSudokuTableUserLimit+1; id++ {
+	users := make(map[int]panel.UserInfo, 9)
+	for id := 1; id <= 9; id++ {
 		users[id] = panel.UserInfo{Id: id, Uuid: fmt.Sprintf("fallback-sudoku-user-%d", id)}
 	}
 	server := startMultiUserSudokuServer(t, "raw", users)
