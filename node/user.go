@@ -24,21 +24,21 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		return err
 	}
 	reportTraffic := filterTrafficByMinimum(userTraffic, reportmin)
-	if len(reportTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, reportTraffic)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report user traffic failed")
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-		} else {
-			c.server.CommitUserTraffic(c.tag, reportTraffic)
-			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(reportTraffic))
-			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
+	err = c.apiClient.ReportUserTraffic(ctx, reportTraffic)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Info("Report user traffic failed")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
+	} else {
+		if len(reportTraffic) > 0 {
+			c.server.CommitUserTraffic(c.tag, reportTraffic)
+		}
+		log.WithField("tag", c.tag).Infof("Report %d users traffic", len(reportTraffic))
+		//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
 	}
 
 	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
@@ -114,6 +114,13 @@ func (c *Controller) reportPendingOfflineUsers(ctx context.Context) error {
 	}
 	c.limiter.MarkOfflineUsersReported(offline)
 	return nil
+}
+
+func (c *Controller) clearPanelOnlineUserCount(ctx context.Context) error {
+	if c == nil || c.apiClient == nil {
+		return nil
+	}
+	return c.apiClient.ReportUserTraffic(ctx, nil)
 }
 
 func (c *Controller) refreshAliveList(ctx context.Context) error {

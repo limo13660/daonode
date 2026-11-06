@@ -111,6 +111,11 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
+	clearCtx, clearCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := c.clearPanelOnlineUserCount(clearCtx); err != nil {
+		log.WithFields(log.Fields{"tag": tag, "err": err}).Warn("Clear panel online user count on startup failed")
+	}
+	clearCancel()
 	c.limiter = limiter.AddLimiter(
 		node.Type,
 		tag,
@@ -236,6 +241,11 @@ func (c *Controller) Close() error {
 			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Clear online users before shutdown failed")
 		}
 		onlineCancel()
+		clearCtx, clearCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.clearPanelOnlineUserCount(clearCtx); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Clear panel online user count on shutdown failed")
+		}
+		clearCancel()
 	}
 	var err error
 	if c.active && c.server != nil && c.tag != "" {
