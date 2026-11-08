@@ -25,6 +25,11 @@ const (
 	Reality
 )
 
+const (
+	mieruMTUMin = 1280
+	mieruMTUMax = 1500
+)
+
 type NodeInfo struct {
 	Id           int
 	Type         string
@@ -434,6 +439,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
 		}
 		if common.MTU == 0 {
 			common.MTU = 1400
+		}
+		if common.MTU < mieruMTUMin || common.MTU > mieruMTUMax {
+			return nil, fmt.Errorf("invalid Mieru MTU: %d (must be %d-%d)", common.MTU, mieruMTUMin, mieruMTUMax)
 		}
 	}
 	if common.Protocol == "naive" {

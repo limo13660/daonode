@@ -378,3 +378,63 @@ func TestGetNodeInfoSudokuTreatsEmptyLegacyFieldsAsDefaults(t *testing.T) {
 		t.Fatalf("empty Sudoku fields = %#v", settings)
 	}
 }
+
+func TestGetNodeInfoMieruMTUContract(t *testing.T) {
+	tests := []struct {
+		name    string
+		mtu     any
+		want    int
+		wantErr string
+	}{
+		{name: "official default when omitted", want: 1400},
+		{name: "minimum", mtu: 1280, want: 1280},
+		{name: "maximum", mtu: 1500, want: 1500},
+		{name: "below minimum", mtu: 1279, wantErr: "invalid Mieru MTU"},
+		{name: "above maximum", mtu: 1501, wantErr: "invalid Mieru MTU"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				payload := map[string]any{
+					"protocol":    "mieru",
+					"kernel":      "mieru",
+					"listen_ip":   "0.0.0.0",
+					"server_port": 2027,
+				}
+				if test.mtu != nil {
+					payload["mtu"] = test.mtu
+				}
+				if err := json.NewEncoder(w).Encode(payload); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			retryCount := 0
+			client, err := New(&conf.NodeConfig{
+				APIHost:    server.URL,
+				NodeID:     7,
+				Key:        "secret",
+				RetryCount: &retryCount,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			info, err := client.GetNodeInfo(context.Background())
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("GetNodeInfo() error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetNodeInfo() error = %v", err)
+			}
+			if info.Common.MTU != test.want {
+				t.Fatalf("Mieru MTU = %d, want %d", info.Common.MTU, test.want)
+			}
+		})
+	}
+}
