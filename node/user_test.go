@@ -47,14 +47,20 @@ func TestChangedUserIDRotatesThePanelScopedUsername(t *testing.T) {
 	}
 }
 
-func TestAliveUserIDsIncludesUsersMissingFromCurrentList(t *testing.T) {
-	got := aliveUserIDs(map[int]int{1: 2, 2: 0, 99: 1})
-	gotMap := make(map[int]bool, len(got))
-	for _, uid := range got {
-		gotMap[uid] = true
+func TestFilterOnlineUsersKeepsUsersWithoutTrafficSnapshot(t *testing.T) {
+	online := []panel.OnlineUser{
+		{UID: 1, IP: "203.0.113.1"},
+		{UID: 2, IP: "203.0.113.2"},
+		{UID: 3, IP: "203.0.113.3"},
 	}
-	if len(gotMap) != 2 || !gotMap[1] || !gotMap[99] {
-		t.Fatalf("alive user IDs = %#v, want 1 and 99", got)
+	traffic := []panel.UserTraffic{
+		{UID: 1, Upload: 1000, Download: 0}, // below the 2 KB device threshold
+		{UID: 2, Upload: 2000, Download: 0}, // exactly at threshold is counted
+	}
+
+	got := filterOnlineUsers(online, traffic, 2)
+	if len(got) != 2 || got[0].UID != 2 || got[1].UID != 3 {
+		t.Fatalf("filtered online users = %#v, want users 2 and 3", got)
 	}
 }
 

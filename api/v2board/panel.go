@@ -17,7 +17,6 @@ import (
 
 type Client struct {
 	client           *resty.Client
-	reportClient     *resty.Client
 	APIHost          string
 	Token            string
 	NodeId           int
@@ -49,18 +48,13 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		"node_id":   strconv.Itoa(c.NodeID),
 		"token":     c.Key,
 	})
-	// Do not automatically replay traffic and online-user POST requests inside
-	// one Resty call. A panel may have accepted a request whose response was
-	// lost, so an immediate transport retry increases duplicate-accounting risk.
-	reportClient := client.Clone().SetRetryCount(0)
 	return &Client{
-		client:       client,
-		reportClient: reportClient,
-		Token:        c.Key,
-		APIHost:      c.APIHost,
-		NodeId:       c.NodeID,
-		UserList:     &UserListBody{},
-		AliveMap:     &AliveMap{},
+		client:   client,
+		Token:    c.Key,
+		APIHost:  c.APIHost,
+		NodeId:   c.NodeID,
+		UserList: &UserListBody{},
+		AliveMap: &AliveMap{},
 	}, nil
 }
 

@@ -9,7 +9,6 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 
-	"github.com/go-resty/resty/v2"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -136,66 +135,33 @@ type UserTraffic struct {
 
 // ReportUserTraffic reports the user traffic
 func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
-	return c.reportUserTraffic(ctx, userTraffic, false)
-}
-
-// ClearPanelOnlineUserCount explicitly clears the panel's cached online count
-// for this node. It is used during startup and shutdown; an ordinary empty
-// traffic report must not make an idle node appear to have zero users.
-func (c *Client) ClearPanelOnlineUserCount(ctx context.Context) error {
-	return c.reportUserTraffic(ctx, nil, true)
-}
-
-func (c *Client) reportUserTraffic(ctx context.Context, userTraffic []UserTraffic, clearOnlineCount bool) error {
 	data := make(map[int][]int64, len(userTraffic))
 	for i := range userTraffic {
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
 	const path = "/api/v1/server/UniProxy/push"
-	request := c.reportingClient().R()
-	if clearOnlineCount {
-		request.SetHeader("X-Daonode-Clear-Online", "1")
-	}
-	request.SetContext(ctx)
-	request.SetBody(data)
-	request.ForceContentType("application/json")
-	response, err := request.Post(path)
+	_, err := c.client.R().
+		SetContext(ctx).
+		SetBody(data).
+		ForceContentType("application/json").
+		Post(path)
 	if err != nil {
-		return c.requestError(err)
-	}
-	if response == nil || response.IsError() {
-		if response == nil {
-			return fmt.Errorf("report user traffic received nil response")
-		}
-		return fmt.Errorf("report user traffic failed with status %d", response.StatusCode())
+		return err
 	}
 	return nil
 }
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
-	response, err := c.reportingClient().R().
+	_, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 
 	if err != nil {
-		return c.requestError(err)
-	}
-	if response == nil || response.IsError() {
-		if response == nil {
-			return fmt.Errorf("report online users received nil response")
-		}
-		return fmt.Errorf("report online users failed with status %d", response.StatusCode())
+		return err
 	}
 
 	return nil
-}
-
-func (c *Client) reportingClient() *resty.Client {
-	if c.reportClient != nil {
-		return c.reportClient
-	}
-	return c.client
 }

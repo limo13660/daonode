@@ -111,11 +111,6 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
-	clearCtx, clearCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := c.clearPanelOnlineUserCount(clearCtx); err != nil {
-		log.WithFields(log.Fields{"tag": tag, "err": err}).Warn("Clear panel online user count on startup failed")
-	}
-	clearCancel()
 	c.limiter = limiter.AddLimiter(
 		node.Type,
 		tag,
@@ -123,20 +118,6 @@ func (c *Controller) Start(x *core.V2Core) error {
 		users,
 		alive,
 	)
-	// A process restart loses the previous IP snapshot, but the panel may
-	// still retain this node's last online report. Queue those users for an
-	// explicit empty-state report before accepting new connections.
-	staleOnlineUIDs := aliveUserIDs(alive)
-	c.limiter.QueueOfflineUIDs(tag, staleOnlineUIDs)
-	if len(staleOnlineUIDs) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := c.reportPendingOfflineUsers(ctx); err != nil {
-			log.WithFields(log.Fields{"tag": tag, "err": err, "users": len(staleOnlineUIDs)}).Warn("Clear stale online users failed; will retry")
-		} else if err := c.refreshAliveList(ctx); err != nil {
-			log.WithFields(log.Fields{"tag": tag, "err": err}).Warn("Refresh alive list after stale-online cleanup failed")
-		}
-		cancel()
-	}
 	added, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      tag,
 		Users:    users,
@@ -232,20 +213,6 @@ func (c *Controller) Close() error {
 			}).Warn("Flush user traffic before stopping runtime failed")
 		}
 		trafficCancel()
-		c.stateMu.RLock()
-		alive := cloneAliveMap(c.aliveMap)
-		c.stateMu.RUnlock()
-		c.limiter.QueueOfflineUIDs(c.tag, aliveUserIDs(alive))
-		onlineCtx, onlineCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := c.reportPendingOfflineUsers(onlineCtx); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Clear online users before shutdown failed")
-		}
-		onlineCancel()
-		clearCtx, clearCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := c.clearPanelOnlineUserCount(clearCtx); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Clear panel online user count on shutdown failed")
-		}
-		clearCancel()
 	}
 	var err error
 	if c.active && c.server != nil && c.tag != "" {

@@ -15,17 +15,15 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
-	trafficMin := reportmin
-	if devicemin < trafficMin {
-		trafficMin = devicemin
-	}
-	userTraffic, err := c.server.GetUserTrafficSlice(c.tag, trafficMin)
+	// Keep the traffic snapshot threshold independent from the online-device
+	// threshold. This matches v2node and ensures every returned item is either
+	// reported or retained for a later retry.
+	userTraffic, err := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if err != nil {
 		return err
 	}
-	reportTraffic := filterTrafficByMinimum(userTraffic, reportmin)
-	if len(reportTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, reportTraffic)
+	if len(userTraffic) > 0 {
+		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -35,8 +33,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				return err
 			}
 		} else {
-			c.server.CommitUserTraffic(c.tag, reportTraffic)
-			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(reportTraffic))
+			c.server.CommitUserTraffic(c.tag, userTraffic)
+			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
 		}
 	}
@@ -46,19 +44,12 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			"tag": c.tag,
 			"err": err,
 		}).Info("Get online device failed")
-	} else {
+	} else if len(*onlineDevice) > 0 {
 		result := filterOnlineUsers(*onlineDevice, userTraffic, devicemin)
-		offline := c.limiter.GetPendingOfflineUsers()
 		data := make(map[int][]string)
 		for _, onlineuser := range result {
 			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
-		}
-		for _, offlineUser := range offline {
-			if _, onlineNow := data[offlineUser.UID]; !onlineNow {
-				// A non-nil empty slice must be encoded as [] instead of null.
-				data[offlineUser.UID] = []string{}
-			}
 		}
 		if len(data) != 0 {
 			err := c.apiClient.ReportNodeOnlineUsers(ctx, &data)
@@ -72,20 +63,6 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				}
 			} else {
 				c.limiter.MarkOnlineDeviceReported(result)
-				if len(offline) > 0 {
-					// The panel invalidates its aggregate alive cache after accepting
-					// this report. Refresh it before removing the local reconnect grace.
-					alive, aliveErr := c.apiClient.GetUserAlive(ctx)
-					if aliveErr != nil {
-						log.WithFields(log.Fields{
-							"tag": c.tag,
-							"err": aliveErr,
-						}).Info("Refresh alive list after offline report failed")
-					} else {
-						c.limiter.SetAliveList(alive)
-						c.limiter.MarkOfflineUsersReported(offline)
-					}
-				}
 			}
 		}
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
@@ -94,61 +71,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	return nil
 }
 
-// reportPendingOfflineUsers clears online entries left by a previous process.
-// The panel stores online IPs per node, so an empty list removes this node's
-// old contribution without affecting the same user on another node.
-func (c *Controller) reportPendingOfflineUsers(ctx context.Context) error {
-	if c == nil || c.limiter == nil || c.apiClient == nil {
-		return nil
-	}
-	offline := c.limiter.GetPendingOfflineUsers()
-	if len(offline) == 0 {
-		return nil
-	}
-	data := make(map[int][]string, len(offline))
-	for _, item := range offline {
-		data[item.UID] = []string{}
-	}
-	if err := c.apiClient.ReportNodeOnlineUsers(ctx, &data); err != nil {
-		return err
-	}
-	c.limiter.MarkOfflineUsersReported(offline)
-	return nil
-}
-
-func (c *Controller) clearPanelOnlineUserCount(ctx context.Context) error {
-	if c == nil || c.apiClient == nil {
-		return nil
-	}
-	return c.apiClient.ClearPanelOnlineUserCount(ctx)
-}
-
-func (c *Controller) refreshAliveList(ctx context.Context) error {
-	if c == nil || c.limiter == nil || c.apiClient == nil {
-		return nil
-	}
-	alive, err := c.apiClient.GetUserAlive(ctx)
-	if err != nil {
-		return err
-	}
-	c.limiter.SetAliveList(alive)
-	c.stateMu.Lock()
-	c.aliveMap = cloneAliveMap(alive)
-	c.stateMu.Unlock()
-	return nil
-}
-
-func aliveUserIDs(alive map[int]int) []int {
-	result := make([]int, 0, len(alive))
-	for uid, count := range alive {
-		if uid > 0 && count > 0 {
-			result = append(result, uid)
-		}
-	}
-	return result
-}
-
-// flushUserTraffic makes one non-retried, best-effort submission after the
+// flushUserTraffic makes one best-effort submission after the
 // periodic tasks have stopped and before the runtime counters are discarded.
 // A failed submission is deliberately left uncommitted.
 func (c *Controller) flushUserTraffic(ctx context.Context) error {
@@ -167,32 +90,23 @@ func (c *Controller) flushUserTraffic(ctx context.Context) error {
 	return nil
 }
 
-func filterTrafficByMinimum(traffic []panel.UserTraffic, minimum int) []panel.UserTraffic {
-	if minimum <= 0 {
-		return traffic
-	}
-	threshold := int64(minimum) * 1000
-	result := make([]panel.UserTraffic, 0, len(traffic))
-	for _, item := range traffic {
-		if item.ForceReport || item.Upload+item.Download > threshold {
-			result = append(result, item)
-		}
-	}
-	return result
-}
-
 func filterOnlineUsers(online []panel.OnlineUser, traffic []panel.UserTraffic, minimum int) []panel.OnlineUser {
 	if minimum <= 0 {
 		return online
 	}
 	threshold := int64(minimum) * 1000
-	totals := make(map[int]int64, len(traffic))
+	// Match v2node's semantics: only users explicitly present in this traffic
+	// snapshot and below the device threshold are excluded. A connected user
+	// with no traffic in this interval is still reported to /alive.
+	noCountUID := make(map[int]struct{}, len(traffic))
 	for _, item := range traffic {
-		totals[item.UID] = item.Upload + item.Download
+		if item.Upload+item.Download < threshold {
+			noCountUID[item.UID] = struct{}{}
+		}
 	}
 	result := make([]panel.OnlineUser, 0, len(online))
 	for _, item := range online {
-		if totals[item.UID] > threshold {
+		if _, excluded := noCountUID[item.UID]; !excluded {
 			result = append(result, item)
 		}
 	}
